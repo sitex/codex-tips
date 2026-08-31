@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() {
+  printf 'install-codex-tips: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: install-codex-tips [--force]
+
+Build and install the codex-tips patch for the currently installed Codex CLI.
+
+Environment overrides:
+  CODEX_TIPS_CODEX          Official Codex command used for version detection
+  CODEX_TIPS_CODE_MODE_HOST Companion binary to install (default: discover beside Codex)
+  CODEX_TIPS_UPSTREAM       Codex Git repository (default: OpenAI/codex)
+  CODEX_TIPS_CACHE_DIR      Git source cache (default: ~/.cache/codex-tips)
+  CODEX_TIPS_TARGET_DIR     Cargo target directory (default: /tmp/codex-tips-target-<version>)
+  CODEX_TIPS_INSTALL_ROOT   Permanent binary root (default: ~/.local/lib/codex-tips)
+  CODEX_TIPS_LINK           Stable binary link (default: ~/.local/bin/codex-tips)
+  CODEX_TIPS_ALIAS          Patched `codex` command (default: ~/.local/bin/codex)
+EOF
+}
+
+force=false
+case "${1:-}" in
+  '') ;;
+  --force) force=true ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+[[ $# -le 1 ]] || die 'expected at most one argument'
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/.." && pwd)
+codex_alias=${CODEX_TIPS_ALIAS:-$HOME/.local/bin/codex}
+
+discover_official_codex() {
+  local candidate resolved
+  local -a candidates
+
+  mapfile -t candidates < <(type -a -P codex 2>/dev/null | awk '!seen[$0]++')
+  for candidate in "${candidates[@]}"; do
+    [[ $candidate == "$codex_alias" ]] && continue
+    resolved=$(readlink -f -- "$candidate") || continue
+    case "$resolved" in
+      */@openai/codex/bin/codex.js)
+        printf '%s\n' "$candidate"
+        return
+        ;;
+    esac
+  done
+
+  for candidate in "${candidates[@]}"; do
+    [[ $candidate == "$codex_alias" ]] && continue
+    printf '%s\n' "$candidate"
+    return
+  done
+  return 1
+}
+
+if [[ -n ${CODEX_TIPS_CODEX:-} ]]; then
+  codex_command=$CODEX_TIPS_CODEX
+else
+  codex_command=$(discover_official_codex) \
+    || die 'official Codex command not found; set CODEX_TIPS_CODEX'
+fi
+command -v "$codex_command" >/dev/null 2>&1 || die "Codex command not found: $codex_command"
+
+codex_version_output=$("$codex_command" --version 2>/dev/null) \
+  || die "failed to run '$codex_command --version'"
+if [[ $codex_version_output =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+  codex_version=${BASH_REMATCH[1]}
+else
+  die "could not parse Codex version from: $codex_version_output"
+fi
+codex_tag="rust-v$codex_version"
+
+patch_dir="$repo_root/patches/codex-tips"
+patch_file="$patch_dir/$codex_tag.patch"
+if [[ ! -f $patch_file ]]; then
+  mapfile -t known_patches < <(find "$patch_dir" -maxdepth 1 -type f -name 'rust-v*.patch' -print | sort -V)
+  [[ ${#known_patches[@]} -gt 0 ]] \
+    || die "no codex-tips patches found in $patch_dir"
+  known_versions=$(printf '%s\n' "${known_patches[@]}" | sed -E 's#^.*/rust-v([0-9]+\.[0-9]+\.[0-9]+)\.patch$#\1#' | paste -sd ', ' -)
+  die "unsupported Codex version $codex_version; supported versions: $known_versions"
+fi
+
+case "$codex_tag" in
+  rust-v0.151.0) expected_upstream_commit=78c290807ce710180111df227df3b7a4fe845452 ;;
+  *) die "missing trusted upstream commit for $codex_tag" ;;
+esac
+
+cache_dir=${CODEX_TIPS_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/codex-tips}
+target_dir=${CODEX_TIPS_TARGET_DIR:-${TMPDIR:-/tmp}/codex-tips-target-$codex_version}
+install_root=${CODEX_TIPS_INSTALL_ROOT:-$HOME/.local/lib/codex-tips}
+installed_dir="$install_root/$codex_version"
+installed_binary="$installed_dir/codex"
+installed_code_mode_host="$installed_dir/codex-code-mode-host"
+launcher_link=${CODEX_TIPS_LINK:-$HOME/.local/bin/codex-tips}
+
+find_code_mode_host() {
+  local candidate codex_entry package_root
+  local -a candidates
+
+  if [[ -n ${CODEX_TIPS_CODE_MODE_HOST:-} ]]; then
+    [[ -x $CODEX_TIPS_CODE_MODE_HOST ]] \
+      || die "code-mode host is not executable: $CODEX_TIPS_CODE_MODE_HOST"
+    readlink -f -- "$CODEX_TIPS_CODE_MODE_HOST"
+    return
+  fi
+
+  codex_entry=$(command -v "$codex_command")
+  codex_entry=$(readlink -f -- "$codex_entry") \
+    || die "failed to resolve Codex command: $codex_command"
+
+  candidate="$(dirname -- "$codex_entry")/codex-code-mode-host"
+  if [[ -x $candidate ]]; then
+    printf '%s\n' "$candidate"
+    return
+  fi
+
+  case "$codex_entry" in
+    */bin/codex.js) package_root=${codex_entry%/bin/codex.js} ;;
+    *)
+      die "could not locate codex-code-mode-host beside $codex_entry; set CODEX_TIPS_CODE_MODE_HOST"
+      ;;
+  esac
+
+  mapfile -t candidates < <(
+    find "$package_root" -type f -name codex-code-mode-host -perm -u+x -print
+  )
+  [[ ${#candidates[@]} -eq 1 ]] \
+    || die "expected one codex-code-mode-host under $package_root, found ${#candidates[@]}; set CODEX_TIPS_CODE_MODE_HOST"
+  printf '%s\n' "${candidates[0]}"
+}
+
+install_code_mode_host() {
+  local host_source staged_host
+
+  host_source=$(find_code_mode_host)
+  install -d "$installed_dir"
+  staged_host="$installed_dir/.codex-code-mode-host.$$"
+  install -m 0755 "$host_source" "$staged_host"
+  mv -f "$staged_host" "$installed_code_mode_host"
+  printf 'Installed code-mode host: %s\n' "$installed_code_mode_host"
+}
+
+install_launchers() {
+  local alias_dir alias_tmp link_dir link_target link_tmp
+
+  link_dir=$(dirname -- "$launcher_link")
+  install -d "$link_dir"
+  if [[ -e $launcher_link || -L $launcher_link ]]; then
+    [[ -L $launcher_link ]] \
+      || die "refusing to replace existing codex-tips command: $launcher_link"
+    link_target=$(readlink -f -- "$launcher_link" 2>/dev/null || true)
+    case "$link_target" in
+      "$install_root"/*/codex) ;;
+      *) die "refusing to replace unmanaged codex-tips link: $launcher_link" ;;
+    esac
+  fi
+  link_tmp="$link_dir/.codex-tips-link.$$"
+  ln -s "$installed_binary" "$link_tmp"
+  mv -Tf "$link_tmp" "$launcher_link"
+
+  if [[ -e $codex_alias || -L $codex_alias ]]; then
+    if [[ ! -L $codex_alias || $(readlink -- "$codex_alias") != "$launcher_link" ]]; then
+      die "refusing to replace existing Codex command: $codex_alias"
+    fi
+  fi
+  alias_dir=$(dirname -- "$codex_alias")
+  install -d "$alias_dir"
+  alias_tmp="$alias_dir/.codex-alias.$$"
+  ln -s "$launcher_link" "$alias_tmp"
+  mv -Tf "$alias_tmp" "$codex_alias"
+  printf 'Installed patched Codex command: %s\n' "$codex_alias"
+  printf '%s\n' "Restart existing Codex sessions; run \`hash -r\` in long-lived Bash shells before launching \`codex\`."
+}
+
+binary_matches_version() {
+  local output
+  output=$("$1" --version 2>/dev/null) || return 1
+  [[ $output == *"$codex_version"* ]]
+}
+
+if [[ $force == false && -x $installed_binary ]] && binary_matches_version "$installed_binary"; then
+  if [[ ! -x $installed_code_mode_host ]]; then
+    install_code_mode_host
+  fi
+  install_launchers
+  printf 'codex-tips %s is already installed at %s\n' "$codex_version" "$installed_binary"
+  "$launcher_link" --version
+  exit 0
+fi
+
+upstream=${CODEX_TIPS_UPSTREAM:-https://github.com/openai/codex.git}
+source_repo="$cache_dir/upstream.git"
+install -d "$cache_dir"
+if [[ ! -d $source_repo ]]; then
+  git init --bare "$source_repo" >/dev/null
+  git --git-dir="$source_repo" remote add origin "$upstream"
+else
+  current_upstream=$(git --git-dir="$source_repo" remote get-url origin 2>/dev/null || true)
+  if [[ $current_upstream != "$upstream" ]]; then
+    git --git-dir="$source_repo" remote set-url origin "$upstream"
+  fi
+fi
+
+if ! git --git-dir="$source_repo" show-ref --verify --quiet "refs/tags/$codex_tag"; then
+  printf 'Fetching Codex source tag %s...\n' "$codex_tag"
+  git --git-dir="$source_repo" fetch --depth=1 origin \
+    "refs/tags/$codex_tag:refs/tags/$codex_tag"
+fi
+actual_upstream_commit=$(git --git-dir="$source_repo" rev-parse "$codex_tag^{}")
+[[ $actual_upstream_commit == "$expected_upstream_commit" ]] \
+  || die "upstream tag $codex_tag resolved to untrusted commit $actual_upstream_commit"
+
+checkout_root=$(mktemp -d "${TMPDIR:-/tmp}/codex-tips-source.XXXXXX")
+checkout="$checkout_root/source"
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if [[ -d $checkout ]]; then
+    git --git-dir="$source_repo" worktree remove --force "$checkout" >/dev/null 2>&1 || true
+  fi
+  rmdir "$checkout_root" >/dev/null 2>&1 || true
+  exit "$status"
+}
+trap cleanup EXIT
+
+git --git-dir="$source_repo" worktree add --detach "$checkout" "$codex_tag" >/dev/null
+printf 'Applying %s...\n' "$(basename -- "$patch_file")"
+if ! git -C "$checkout" apply --3way "$patch_file"; then
+  die "patch does not apply cleanly to $codex_tag; add a ported $codex_tag.patch"
+fi
+
+printf 'Building codex-tips %s...\n' "$codex_version"
+env CARGO_TARGET_DIR="$target_dir" CARGO_INCREMENTAL=0 \
+  cargo build --manifest-path "$checkout/codex-rs/Cargo.toml" -p codex-cli --release
+
+built_binary="$target_dir/release/codex"
+[[ -x $built_binary ]] || die "build finished without executable: $built_binary"
+binary_matches_version "$built_binary" \
+  || die "built binary version does not match $codex_version"
+
+install -d "$installed_dir"
+staged_binary="$installed_dir/.codex.$$"
+install -m 0755 "$built_binary" "$staged_binary"
+mv -f "$staged_binary" "$installed_binary"
+install_code_mode_host
+install_launchers
+
+printf 'Installed codex-tips %s at %s\n' "$codex_version" "$installed_binary"
+"$launcher_link" --version

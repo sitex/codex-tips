@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run installer regression
+        run: bash tests/install-codex-tips.sh
+      - name: Lint shell scripts
+        run: shellcheck bin/install-codex-tips tests/install-codex-tips.sh
+
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check pinned upstream patch
+        run: |
+          git clone --depth 1 --branch rust-v0.151.0 https://github.com/openai/codex.git /tmp/codex-tips-upstream
+          test "$(git -C /tmp/codex-tips-upstream rev-parse HEAD)" = 78c290807ce710180111df227df3b7a4fe845452
+          git -C /tmp/codex-tips-upstream apply --check "$GITHUB_WORKSPACE/patches/codex-tips/rust-v0.151.0.patch"
