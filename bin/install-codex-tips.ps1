@@ -166,6 +166,8 @@ if (-not (Test-Path -LiteralPath $sourceRepo -PathType Container)) {
 }
 & git --git-dir=$sourceRepo config core.longpaths true
 if ($LASTEXITCODE -ne 0) { Fail "failed to enable long source paths" }
+& git --git-dir=$sourceRepo config core.autocrlf false
+if ($LASTEXITCODE -ne 0) { Fail "failed to preserve upstream line endings" }
 & git --git-dir=$sourceRepo show-ref --verify --quiet "refs/tags/$codexTag"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Fetching Codex source tag $codexTag..."
