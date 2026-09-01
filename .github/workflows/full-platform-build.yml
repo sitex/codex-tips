@@ -12,6 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-15-intel]
+        version: ["0.151.0", "0.152.0"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 240
     steps:
@@ -20,15 +21,19 @@ jobs:
         with:
           node-version: 22
       - name: Install official Codex
-        run: npm install --global @openai/codex@0.152.0
+        run: npm install --global @openai/codex@${{ matrix.version }}
       - name: Install Rust toolchain
         run: rustup toolchain install 1.95.0 --profile minimal
       - name: Build and install codex-tips
         run: ./bin/install-codex-tips
       - name: Exercise installed command
-        run: ~/.local/bin/codex-tips --version | grep '0.152.0'
+        run: test "$(~/.local/bin/codex-tips --version)" = "codex-cli ${{ matrix.version }}"
 
   build-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["0.151.0", "0.152.0"]
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -37,7 +42,7 @@ jobs:
         with:
           node-version: 22
       - name: Install official Codex
-        run: npm install --global @openai/codex@0.152.0
+        run: npm install --global @openai/codex@${{ matrix.version }}
       - name: Install Rust toolchain
         run: rustup toolchain install 1.95.0 --profile minimal
       - name: Build and install codex-tips
@@ -49,4 +54,4 @@ jobs:
         shell: pwsh
         run: |
           $output = & "$env:LOCALAPPDATA\codex-tips\bin\codex-tips.cmd" --version
-          if ($output -notmatch '0\.152\.0') { throw "unexpected version: $output" }
+          if ($output -ne "codex-cli ${{ matrix.version }}") { throw "unexpected version: $output" }
