@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-01
+
+### Added
+
+- Support source builds and managed launchers on x86_64 macOS and native Windows.
+- Add a native PowerShell installer and Windows installer regression.
+- Exercise Unix installers on Linux and macOS in CI, with manual full-build gates for all three supported operating systems.
+
+### Changed
+
+- Install the complete official platform runtime package while replacing only the patched `codex` binary.
+- Restore bundled helpers such as `bwrap`, ripgrep, code mode, and Windows sandbox executables on fast-path installs.
+- Make the Unix installer compatible with the Bash and BSD userland shipped by macOS.
+
 ## [0.1.0] - 2026-09-01
 
 ### Added

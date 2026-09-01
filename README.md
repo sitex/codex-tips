@@ -13,37 +13,57 @@ by OpenAI.
 
 ## Compatibility
 
-Release 0.1.0 supports exactly Codex CLI `0.151.0` (`rust-v0.151.0`, upstream
+Release 0.2.0 supports exactly Codex CLI `0.151.0` (`rust-v0.151.0`, upstream
 commit `78c290807ce710180111df227df3b7a4fe845452`). The installer refuses other
 versions instead of attempting an unverified patch port.
 
-The installer is tested on Linux with Bash and GNU coreutils. It builds Codex from
-source, so installation can take several minutes and use several gigabytes of disk.
+The release is tested on x86_64 Linux, macOS, and native Windows. ARM64 packages
+exist upstream but are not release-gated by this project yet. The installer builds
+Codex from source, so installation can take several minutes and use several
+gigabytes of disk.
 
 Requirements:
 
 - the official Codex CLI 0.151.0 installation;
 - Git;
 - Rust and Cargo compatible with the upstream `rust-toolchain.toml`;
-- Bash 4+ and GNU coreutils.
+- Bash 3.2 or newer on Linux and macOS, or PowerShell 7 on Windows.
 
-## Install 0.1.0
+## Install 0.2.0
 
 Download both assets from the
-[v0.1.0 release](https://github.com/sitex/codex-tips/releases/tag/v0.1.0):
+[v0.2.0 release](https://github.com/sitex/codex-tips/releases/tag/v0.2.0):
 
 ```text
-codex-tips-0.1.0.tar.gz
-codex-tips-0.1.0.tar.gz.sha256
+codex-tips-0.2.0.tar.gz
+codex-tips-0.2.0.tar.gz.sha256
 ```
 
-Verify and extract the release before running it:
+On Linux or macOS, verify and extract the release before running it:
 
 ```bash
-sha256sum -c codex-tips-0.1.0.tar.gz.sha256
-tar -xzf codex-tips-0.1.0.tar.gz
-cd codex-tips-0.1.0
+sha256sum -c codex-tips-0.2.0.tar.gz.sha256
+tar -xzf codex-tips-0.2.0.tar.gz
+cd codex-tips-0.2.0
 ./bin/install-codex-tips
+```
+
+macOS provides `shasum` instead of `sha256sum` by default:
+
+```bash
+shasum -a 256 -c codex-tips-0.2.0.tar.gz.sha256
+```
+
+On Windows, use PowerShell:
+
+```powershell
+$expected = (Get-Content .\codex-tips-0.2.0.tar.gz.sha256).Split()[0]
+$actual = (Get-FileHash .\codex-tips-0.2.0.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) { throw "release checksum mismatch" }
+tar -xzf .\codex-tips-0.2.0.tar.gz
+Set-Location .\codex-tips-0.2.0
+$env:CODEX_TIPS_UPDATE_PATH = "1"
+.\bin\install-codex-tips.ps1
 ```
 
 The installer:
@@ -52,13 +72,18 @@ The installer:
 2. fetches the matching OpenAI Codex tag and verifies its pinned commit;
 3. applies the versioned patch;
 4. builds `codex-cli --release`;
-5. installs the patched binary and matching `codex-code-mode-host` under
-   `~/.local/lib/codex-tips/0.151.0/`;
-6. creates `~/.local/bin/codex-tips` and `~/.local/bin/codex` symlinks.
+5. copies the matching official runtime package and replaces only its `codex`
+   binary with the patched build;
+6. creates managed `codex-tips` and `codex` launchers.
 
 The installer refuses to overwrite commands or symlinks it does not own. Use
-`--force` to rebuild the supported version. Environment overrides are listed by
-`./bin/install-codex-tips --help`.
+`--force` on Unix or `-Force` on Windows to rebuild the supported version.
+Environment overrides are listed by `./bin/install-codex-tips --help`; the
+PowerShell installer uses the corresponding `CODEX_TIPS_*` variables.
+
+Unix installs under `~/.local/lib/codex-tips/` and links commands from
+`~/.local/bin/`. Windows installs under `%LOCALAPPDATA%\codex-tips\` and only
+updates the user `PATH` when `CODEX_TIPS_UPDATE_PATH=1` is set.
 
 Restart existing Codex sessions after installation. Long-lived Bash shells may
 also need `hash -r`.
@@ -80,7 +105,7 @@ private-data continuations are explicitly excluded by the prediction instruction
 
 ## Uninstall
 
-First inspect the managed links:
+On Linux or macOS, first inspect the managed links:
 
 ```bash
 readlink ~/.local/bin/codex
@@ -91,6 +116,10 @@ If they point to the paths installed above, remove those two links and the match
 `~/.local/lib/codex-tips/0.151.0/` directory. Then ensure the official Codex launcher
 is next on `PATH` and run `hash -r`.
 
+On Windows, inspect and remove the managed `codex.cmd` and `codex-tips.cmd` files
+plus the matching version directory under `%LOCALAPPDATA%\codex-tips\`. If the
+installer added its bin directory to the user `PATH`, remove that entry as well.
+
 ## Development
 
 Run the standalone installer regression and shell lint:
@@ -98,6 +127,12 @@ Run the standalone installer regression and shell lint:
 ```bash
 bash tests/install-codex-tips.sh
 shellcheck bin/install-codex-tips tests/install-codex-tips.sh
+```
+
+On Windows, run:
+
+```powershell
+pwsh -NoProfile -File tests\install-codex-tips.ps1
 ```
 
 Verify the patch against the pinned upstream checkout:

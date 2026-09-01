@@ -8,15 +8,28 @@ permissions:
   contents: read
 
 jobs:
-  installer:
-    runs-on: ubuntu-latest
+  installer-unix:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Run installer regression
         run: bash tests/install-codex-tips.sh
       - name: Lint shell scripts
+        if: runner.os == 'Linux'
         run: shellcheck bin/install-codex-tips tests/install-codex-tips.sh
+
+  installer-windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run installer regression
+        shell: pwsh
+        run: ./tests/install-codex-tips.ps1
 
   patch:
     runs-on: ubuntu-latest

@@ -15,6 +15,7 @@ Build and install the codex-tips patch for the currently installed Codex CLI.
 Environment overrides:
   CODEX_TIPS_CODEX          Official Codex command used for version detection
   CODEX_TIPS_CODE_MODE_HOST Companion binary to install (default: discover beside Codex)
+  CODEX_TIPS_RUNTIME_PACKAGE Official platform package root (default: auto-detect)
   CODEX_TIPS_UPSTREAM       Codex Git repository (default: OpenAI/codex)
   CODEX_TIPS_CACHE_DIR      Git source cache (default: ~/.cache/codex-tips)
   CODEX_TIPS_TARGET_DIR     Cargo target directory (default: /tmp/codex-tips-target-<version>)
@@ -39,32 +40,44 @@ case "${1:-}" in
 esac
 [[ $# -le 1 ]] || die 'expected at most one argument'
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd -- "$script_dir/.." && pwd)
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd "$script_dir/.." && pwd)
 codex_alias=${CODEX_TIPS_ALIAS:-$HOME/.local/bin/codex}
 
-discover_official_codex() {
-  local candidate resolved
-  local -a candidates
+resolve_path() {
+  local path=$1 target
 
-  mapfile -t candidates < <(type -a -P codex 2>/dev/null | awk '!seen[$0]++')
-  for candidate in "${candidates[@]}"; do
+  case "$path" in
+    /*) ;;
+    *) path="$PWD/$path" ;;
+  esac
+  while [[ -L $path ]]; do
+    target=$(readlink "$path") || return
+    case "$target" in
+      /*) path=$target ;;
+      *) path="$(dirname "$path")/$target" ;;
+    esac
+  done
+  printf '%s/%s\n' "$(cd -P "$(dirname "$path")" && pwd)" "$(basename "$path")"
+}
+
+discover_official_codex() {
+  local candidate fallback resolved
+  fallback=
+
+  while IFS= read -r candidate; do
     [[ $candidate == "$codex_alias" ]] && continue
-    resolved=$(readlink -f -- "$candidate") || continue
+    [[ -n $fallback ]] || fallback=$candidate
+    resolved=$(resolve_path "$candidate") || continue
     case "$resolved" in
       */@openai/codex/bin/codex.js)
         printf '%s\n' "$candidate"
         return
         ;;
     esac
-  done
-
-  for candidate in "${candidates[@]}"; do
-    [[ $candidate == "$codex_alias" ]] && continue
-    printf '%s\n' "$candidate"
-    return
-  done
-  return 1
+  done < <(type -a -P codex 2>/dev/null | awk '!seen[$0]++')
+  [[ -n $fallback ]] || return 1
+  printf '%s\n' "$fallback"
 }
 
 if [[ -n ${CODEX_TIPS_CODEX:-} ]]; then
@@ -87,10 +100,17 @@ codex_tag="rust-v$codex_version"
 patch_dir="$repo_root/patches/codex-tips"
 patch_file="$patch_dir/$codex_tag.patch"
 if [[ ! -f $patch_file ]]; then
-  mapfile -t known_patches < <(find "$patch_dir" -maxdepth 1 -type f -name 'rust-v*.patch' -print | sort -V)
-  [[ ${#known_patches[@]} -gt 0 ]] \
-    || die "no codex-tips patches found in $patch_dir"
-  known_versions=$(printf '%s\n' "${known_patches[@]}" | sed -E 's#^.*/rust-v([0-9]+\.[0-9]+\.[0-9]+)\.patch$#\1#' | paste -sd ', ' -)
+  known_versions=
+  for known_patch in "$patch_dir"/rust-v*.patch; do
+    [[ -f $known_patch ]] || continue
+    known_version=$(printf '%s\n' "$known_patch" | sed -E 's#^.*/rust-v([0-9]+\.[0-9]+\.[0-9]+)\.patch$#\1#')
+    if [[ -n $known_versions ]]; then
+      known_versions="$known_versions, $known_version"
+    else
+      known_versions=$known_version
+    fi
+  done
+  [[ -n $known_versions ]] || die "no codex-tips patches found in $patch_dir"
   die "unsupported Codex version $codex_version; supported versions: $known_versions"
 fi
 
@@ -103,85 +123,106 @@ cache_dir=${CODEX_TIPS_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/codex-tips}
 target_dir=${CODEX_TIPS_TARGET_DIR:-${TMPDIR:-/tmp}/codex-tips-target-$codex_version}
 install_root=${CODEX_TIPS_INSTALL_ROOT:-$HOME/.local/lib/codex-tips}
 installed_dir="$install_root/$codex_version"
-installed_binary="$installed_dir/codex"
-installed_code_mode_host="$installed_dir/codex-code-mode-host"
+installed_binary="$installed_dir/bin/codex"
+installed_code_mode_host="$installed_dir/bin/codex-code-mode-host"
 launcher_link=${CODEX_TIPS_LINK:-$HOME/.local/bin/codex-tips}
 
-find_code_mode_host() {
-  local candidate codex_entry package_root
-  local -a candidates
+runtime_package_is_valid() {
+  local root=$1
 
-  if [[ -n ${CODEX_TIPS_CODE_MODE_HOST:-} ]]; then
-    [[ -x $CODEX_TIPS_CODE_MODE_HOST ]] \
-      || die "code-mode host is not executable: $CODEX_TIPS_CODE_MODE_HOST"
-    readlink -f -- "$CODEX_TIPS_CODE_MODE_HOST"
+  [[ -f $root/codex-package.json \
+    && -x $root/bin/codex \
+    && -x $root/bin/codex-code-mode-host \
+    && -d $root/codex-resources \
+    && -d $root/codex-path ]]
+}
+
+find_runtime_package() {
+  local candidate codex_entry count metadata package_root runtime_package
+
+  if [[ -n ${CODEX_TIPS_RUNTIME_PACKAGE:-} ]]; then
+    runtime_package=$(resolve_path "$CODEX_TIPS_RUNTIME_PACKAGE") \
+      || die "failed to resolve runtime package: $CODEX_TIPS_RUNTIME_PACKAGE"
+    runtime_package_is_valid "$runtime_package" \
+      || die "invalid Codex runtime package: $runtime_package"
+    printf '%s\n' "$runtime_package"
     return
   fi
 
   codex_entry=$(command -v "$codex_command")
-  codex_entry=$(readlink -f -- "$codex_entry") \
+  codex_entry=$(resolve_path "$codex_entry") \
     || die "failed to resolve Codex command: $codex_command"
-
-  candidate="$(dirname -- "$codex_entry")/codex-code-mode-host"
-  if [[ -x $candidate ]]; then
+  candidate=${codex_entry%/bin/codex}
+  if [[ $candidate != "$codex_entry" ]] && runtime_package_is_valid "$candidate"; then
     printf '%s\n' "$candidate"
     return
   fi
 
   case "$codex_entry" in
     */bin/codex.js) package_root=${codex_entry%/bin/codex.js} ;;
-    *)
-      die "could not locate codex-code-mode-host beside $codex_entry; set CODEX_TIPS_CODE_MODE_HOST"
-      ;;
+    *) die "could not locate Codex runtime package; set CODEX_TIPS_RUNTIME_PACKAGE" ;;
   esac
-
-  mapfile -t candidates < <(
-    find "$package_root" -type f -name codex-code-mode-host -perm -u+x -print
-  )
-  [[ ${#candidates[@]} -eq 1 ]] \
-    || die "expected one codex-code-mode-host under $package_root, found ${#candidates[@]}; set CODEX_TIPS_CODE_MODE_HOST"
-  printf '%s\n' "${candidates[0]}"
+  count=0
+  while IFS= read -r metadata; do
+    candidate=$(dirname "$metadata")
+    runtime_package_is_valid "$candidate" || continue
+    runtime_package=$candidate
+    count=$((count + 1))
+  done < <(find "$package_root" -type f -name codex-package.json -print)
+  [[ $count -eq 1 ]] \
+    || die "expected one Codex runtime package under $package_root, found $count; set CODEX_TIPS_RUNTIME_PACKAGE"
+  printf '%s\n' "$runtime_package"
 }
 
-install_code_mode_host() {
-  local host_source staged_host
+sync_runtime_support() {
+  local component host_source runtime_package=$1
 
-  host_source=$(find_code_mode_host)
-  install -d "$installed_dir"
-  staged_host="$installed_dir/.codex-code-mode-host.$$"
-  install -m 0755 "$host_source" "$staged_host"
-  mv -f "$staged_host" "$installed_code_mode_host"
-  printf 'Installed code-mode host: %s\n' "$installed_code_mode_host"
+  if [[ -n ${CODEX_TIPS_CODE_MODE_HOST:-} ]]; then
+    [[ -x $CODEX_TIPS_CODE_MODE_HOST ]] \
+      || die "code-mode host is not executable: $CODEX_TIPS_CODE_MODE_HOST"
+    host_source=$CODEX_TIPS_CODE_MODE_HOST
+  else
+    host_source="$runtime_package/bin/codex-code-mode-host"
+  fi
+  install -d "$installed_dir/bin"
+  install -m 0755 "$host_source" "$installed_code_mode_host"
+  install -m 0644 "$runtime_package/codex-package.json" "$installed_dir/codex-package.json"
+  for component in codex-resources codex-path; do
+    install -d "$installed_dir/$component"
+    cp -R "$runtime_package/$component/." "$installed_dir/$component/"
+  done
 }
+
+runtime_package=$(find_runtime_package)
 
 install_launchers() {
   local alias_dir alias_tmp link_dir link_target link_tmp
 
-  link_dir=$(dirname -- "$launcher_link")
+  link_dir=$(dirname "$launcher_link")
   install -d "$link_dir"
   if [[ -e $launcher_link || -L $launcher_link ]]; then
     [[ -L $launcher_link ]] \
       || die "refusing to replace existing codex-tips command: $launcher_link"
-    link_target=$(readlink -f -- "$launcher_link" 2>/dev/null || true)
+    link_target=$(resolve_path "$launcher_link" 2>/dev/null || true)
     case "$link_target" in
-      "$install_root"/*/codex) ;;
+      "$install_root"/*/codex | "$install_root"/*/bin/codex) ;;
       *) die "refusing to replace unmanaged codex-tips link: $launcher_link" ;;
     esac
   fi
   link_tmp="$link_dir/.codex-tips-link.$$"
   ln -s "$installed_binary" "$link_tmp"
-  mv -Tf "$link_tmp" "$launcher_link"
+  mv -f "$link_tmp" "$launcher_link"
 
   if [[ -e $codex_alias || -L $codex_alias ]]; then
-    if [[ ! -L $codex_alias || $(readlink -- "$codex_alias") != "$launcher_link" ]]; then
+    if [[ ! -L $codex_alias || $(readlink "$codex_alias") != "$launcher_link" ]]; then
       die "refusing to replace existing Codex command: $codex_alias"
     fi
   fi
-  alias_dir=$(dirname -- "$codex_alias")
+  alias_dir=$(dirname "$codex_alias")
   install -d "$alias_dir"
   alias_tmp="$alias_dir/.codex-alias.$$"
   ln -s "$launcher_link" "$alias_tmp"
-  mv -Tf "$alias_tmp" "$codex_alias"
+  mv -f "$alias_tmp" "$codex_alias"
   printf 'Installed patched Codex command: %s\n' "$codex_alias"
   printf '%s\n' "Restart existing Codex sessions; run \`hash -r\` in long-lived Bash shells before launching \`codex\`."
 }
@@ -193,9 +234,7 @@ binary_matches_version() {
 }
 
 if [[ $force == false && -x $installed_binary ]] && binary_matches_version "$installed_binary"; then
-  if [[ ! -x $installed_code_mode_host ]]; then
-    install_code_mode_host
-  fi
+  sync_runtime_support "$runtime_package"
   install_launchers
   printf 'codex-tips %s is already installed at %s\n' "$codex_version" "$installed_binary"
   "$launcher_link" --version
@@ -238,7 +277,7 @@ cleanup() {
 trap cleanup EXIT
 
 git --git-dir="$source_repo" worktree add --detach "$checkout" "$codex_tag" >/dev/null
-printf 'Applying %s...\n' "$(basename -- "$patch_file")"
+printf 'Applying %s...\n' "$(basename "$patch_file")"
 if ! git -C "$checkout" apply --3way "$patch_file"; then
   die "patch does not apply cleanly to $codex_tag; add a ported $codex_tag.patch"
 fi
@@ -252,11 +291,10 @@ built_binary="$target_dir/release/codex"
 binary_matches_version "$built_binary" \
   || die "built binary version does not match $codex_version"
 
-install -d "$installed_dir"
-staged_binary="$installed_dir/.codex.$$"
+sync_runtime_support "$runtime_package"
+staged_binary="$installed_dir/bin/.codex.$$"
 install -m 0755 "$built_binary" "$staged_binary"
 mv -f "$staged_binary" "$installed_binary"
-install_code_mode_host
 install_launchers
 
 printf 'Installed codex-tips %s at %s\n' "$codex_version" "$installed_binary"
