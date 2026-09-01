@@ -164,6 +164,8 @@ if (-not (Test-Path -LiteralPath $sourceRepo -PathType Container)) {
     $currentUpstream = (& git --git-dir=$sourceRepo remote get-url origin 2>$null | Out-String).Trim()
     if ($currentUpstream -ne $upstream) { & git --git-dir=$sourceRepo remote set-url origin $upstream }
 }
+& git --git-dir=$sourceRepo config core.longpaths true
+if ($LASTEXITCODE -ne 0) { Fail "failed to enable long source paths" }
 & git --git-dir=$sourceRepo show-ref --verify --quiet "refs/tags/$codexTag"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Fetching Codex source tag $codexTag..."
@@ -173,7 +175,7 @@ if ($LASTEXITCODE -ne 0) {
 $actualCommit = (& git --git-dir=$sourceRepo rev-parse "$codexTag^{}" | Out-String).Trim()
 if ($actualCommit -ne $expectedCommit) { Fail "upstream tag $codexTag resolved to untrusted commit $actualCommit" }
 
-$checkoutRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("codex-tips-source-" + [Guid]::NewGuid().ToString("N"))
+$checkoutRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ct-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
 $checkout = Join-Path $checkoutRoot "source"
 New-Item -ItemType Directory -Path $checkoutRoot | Out-Null
 try {
