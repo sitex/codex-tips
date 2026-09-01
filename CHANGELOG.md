@@ -10,6 +10,7 @@ All notable changes to this project are documented here.
 
 - Support source builds and managed launchers on x86_64 macOS and native Windows.
 - Add a native PowerShell installer and Windows installer regression.
+- Add a Codex/LLM-guided installation checklist with compatibility and checksum safeguards.
 - Exercise Unix installers on Linux and macOS in CI, with manual full-build gates for all three supported operating systems.
 
 ### Changed
