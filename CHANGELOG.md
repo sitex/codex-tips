@@ -15,8 +15,8 @@ All notable changes to this project are documented here.
 
 ### Changed
 
-- Rebase the downstream patch to Codex CLI 0.152.0 (`rust-v0.152.0`) at upstream commit `316795b3cf2a45e90d121d9f46499d4658b2645c`.
-- Temporarily hide the current suggestion while typing and restore it when the composer is cleared; discard it when it is truly stale or invalidated by a new turn.
+- Store matching patches per Codex version and support Codex CLI 0.151.0 (`78c290807ce710180111df227df3b7a4fe845452`) and 0.152.0 (`316795b3cf2a45e90d121d9f46499d4658b2645c`), with 0.152.0 latest and recommended.
+- Keep the same hide-while-typing, clear-to-restore, and stale-to-discard suggestion behavior on both supported Codex versions.
 - Install the complete official platform runtime package while replacing only the patched `codex` binary.
 - Restore bundled helpers such as `bwrap`, ripgrep, code mode, and Windows sandbox executables on fast-path installs.
 - Make the Unix installer compatible with the Bash and BSD userland shipped by macOS.

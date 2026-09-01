@@ -14,9 +14,17 @@ by OpenAI.
 
 ## Compatibility
 
-Release 0.2.0 supports exactly Codex CLI `0.152.0` (`rust-v0.152.0`, upstream
-commit `316795b3cf2a45e90d121d9f46499d4658b2645c`). The installer refuses other
-versions instead of attempting an unverified patch port.
+Release 0.2.0 supports these exact Codex CLI versions:
+
+- `0.152.0` (latest and recommended): upstream commit
+  `316795b3cf2a45e90d121d9f46499d4658b2645c`;
+- `0.151.0`: upstream commit
+  `78c290807ce710180111df227df3b7a4fe845452`.
+
+The installer detects the official Codex version and selects the matching
+`patches/codex-tips/rust-v<version>.patch`. It refuses other versions instead of
+attempting an unverified patch port. Both supported versions use the same
+hide-while-typing, clear-to-restore, and stale-to-discard suggestion behavior.
 
 The release is tested on x86_64 builds of Linux, macOS, and native Windows. ARM64
 packages exist upstream but are not release-gated by this project yet. The
@@ -25,7 +33,7 @@ use several gigabytes of disk.
 
 Requirements:
 
-- the official Codex CLI 0.152.0 installation;
+- an official Codex CLI 0.151.0 or 0.152.0 installation (0.152.0 recommended);
 - Git;
 - Rust and Cargo compatible with the upstream `rust-toolchain.toml`;
 - Bash 3.2 or newer on Linux and macOS, or PowerShell 7 on Windows.
@@ -74,7 +82,7 @@ The installer:
 
 1. detects the official Codex version;
 2. fetches the matching OpenAI Codex tag and verifies its pinned commit;
-3. applies the versioned patch;
+3. applies `patches/codex-tips/rust-v<version>.patch`;
 4. builds `codex-cli --release`;
 5. copies the matching official runtime package and replaces only its `codex`
    binary with the patched build;
@@ -116,9 +124,9 @@ readlink ~/.local/bin/codex
 readlink ~/.local/bin/codex-tips
 ```
 
-If they point to the paths installed above, remove those two links and the matching
-`~/.local/lib/codex-tips/0.152.0/` directory. Then ensure the official Codex launcher
-is next on `PATH` and run `hash -r`.
+If they point to the paths installed above, remove those two links and their
+matching version directory under `~/.local/lib/codex-tips/`. Then ensure the
+official Codex launcher is next on `PATH` and run `hash -r`.
 
 On Windows, inspect and remove the managed `codex.cmd` and `codex-tips.cmd` files
 plus the matching version directory under `%LOCALAPPDATA%\codex-tips\`. If the
@@ -139,12 +147,22 @@ On Windows, run:
 pwsh -NoProfile -File tests\install-codex-tips.ps1
 ```
 
-Verify the patch against the pinned upstream checkout:
+Apply-check every saved patch against its pinned upstream checkout:
 
 ```bash
-git clone --depth 1 --branch rust-v0.152.0 https://github.com/openai/codex.git /tmp/codex-tips-upstream
-test "$(git -C /tmp/codex-tips-upstream rev-parse HEAD)" = 316795b3cf2a45e90d121d9f46499d4658b2645c
-git -C /tmp/codex-tips-upstream apply --check "$PWD/patches/codex-tips/rust-v0.152.0.patch"
+for patch in patches/codex-tips/rust-v*.patch; do
+  version=${patch##*/rust-v}
+  version=${version%.patch}
+  case "$version" in
+    0.151.0) commit=78c290807ce710180111df227df3b7a4fe845452 ;;
+    0.152.0) commit=316795b3cf2a45e90d121d9f46499d4658b2645c ;;
+    *) echo "unpinned patch: $patch" >&2; exit 1 ;;
+  esac
+  upstream="/tmp/codex-tips-upstream-$version"
+  git clone --depth 1 --branch "rust-v$version" https://github.com/openai/codex.git "$upstream"
+  test "$(git -C "$upstream" rev-parse HEAD)" = "$commit"
+  git -C "$upstream" apply --check "$PWD/$patch"
+done
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the release gates.

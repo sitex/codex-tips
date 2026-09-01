@@ -18,14 +18,18 @@ Give it this prompt:
    - the output of `codex --version` and the resolved `codex` command path;
    - whether Git, Rust, Cargo, and the platform shell required by the README are
      available.
-3. Stop if the installed Codex version or platform is unsupported. Do not patch
-   a different version or bypass the installer's pinned-commit checks.
+3. Stop if the installed Codex version or platform is unsupported. Release 0.2.0
+   accepts official Codex 0.151.0 and 0.152.0 installations; 0.152.0 is latest
+   and recommended. Do not patch a different version or bypass the installer's
+   pinned-commit checks.
 4. Download both the release archive and its `.sha256` file into a new temporary
    directory. Verify the checksum with the platform-specific command from the
    README before extracting the archive. Stop on any mismatch.
-5. Run the documented installer for the detected platform. Do not use `--force`
-   or `-Force`, replace an unmanaged launcher, or make a persistent `PATH` change
-   without the user's explicit approval.
+5. Run the documented installer for the detected platform. Confirm that it
+   selects `patches/codex-tips/rust-v<detected-version>.patch`; do not substitute
+   a patch for another Codex version. Do not use `--force` or `-Force`, replace an
+   unmanaged launcher, or make a persistent `PATH` change without the user's
+   explicit approval.
 6. After installation, resolve the `codex-tips` and `codex` command paths and run
    both commands with `--version`. Report the installed paths, versions, and any
    files or environment settings changed.

@@ -2,15 +2,17 @@
 
 ## Supported versions
 
-Only the latest `codex-tips` release and the exact Codex version named by that
-release are supported. Platform support is limited to the operating systems and
-architectures explicitly marked as tested in the release README; ARM64 is not a
-supported configuration for 0.2.0. Release 0.2.0 supports only Codex CLI 0.152.0
-at upstream commit `316795b3cf2a45e90d121d9f46499d4658b2645c`.
+Only the latest `codex-tips` release and the exact Codex versions named by that
+release are supported. Release 0.2.0 supports Codex CLI 0.151.0 at upstream commit
+`78c290807ce710180111df227df3b7a4fe845452` and Codex CLI 0.152.0 at upstream
+commit `316795b3cf2a45e90d121d9f46499d4658b2645c`; 0.152.0 is latest and
+recommended. Its release-gated platforms are x86_64 Linux, macOS, and native
+Windows. ARM64 is not release-gated.
 
-Installers trust only the pinned upstream Codex commit and the platform runtime
-package from the detected official Codex installation. They refuse unsupported
-versions and unmanaged launcher paths.
+Installers select `patches/codex-tips/rust-v<version>.patch` for the detected
+official Codex installation and trust only that version's pinned upstream commit
+and platform runtime package. They refuse unsupported versions and unmanaged
+launcher paths.
 
 ## Reporting a vulnerability
 
