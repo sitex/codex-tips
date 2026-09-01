@@ -5,38 +5,18 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/install-codex-tips-test.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT
 
-package_root="$fixture/npm/lib/node_modules/@openai/codex"
-launcher="$package_root/bin/codex.js"
-runtime_root="$package_root/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl"
-runtime_bin="$runtime_root/bin"
-host_source="$runtime_bin/codex-code-mode-host"
-bwrap_source="$runtime_root/codex-resources/bwrap"
-rg_source="$runtime_root/codex-path/rg"
-manifest_source="$runtime_root/codex-package.json"
-install_root="$fixture/install"
-installed_dir="$install_root/0.152.0"
-installed_binary="$installed_dir/bin/codex"
-stable_link="$fixture/prefix/bin/codex-tips"
-codex_alias="$fixture/prefix/bin/codex"
+test_repo="$fixture/repo"
+installer="$test_repo/bin/install-codex-tips"
 portable_bin="$fixture/portable-bin"
 
 mkdir -p \
-  "$(dirname "$launcher")" \
-  "$runtime_bin" \
-  "$(dirname "$bwrap_source")" \
-  "$(dirname "$rg_source")" \
-  "$(dirname "$installed_binary")" \
-  "$fixture/bin" \
+  "$test_repo/bin" \
+  "$test_repo/patches/codex-tips" \
   "$portable_bin"
-printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "codex-cli 0.152.0"' >"$launcher"
-printf '%s\n' 'host fixture' >"$host_source"
-printf '%s\n' 'bwrap fixture' >"$bwrap_source"
-printf '%s\n' 'rg fixture' >"$rg_source"
-printf '%s\n' '{"layoutVersion":1,"version":"0.152.0"}' >"$manifest_source"
-cp "$launcher" "$runtime_bin/codex"
-chmod 0755 "$launcher" "$runtime_bin/codex" "$host_source" "$bwrap_source" "$rg_source"
-cp "$launcher" "$installed_binary"
-ln -s "$launcher" "$fixture/bin/codex"
+cp "$repo_root/bin/install-codex-tips" "$installer"
+touch \
+  "$test_repo/patches/codex-tips/rust-v0.151.0.patch" \
+  "$test_repo/patches/codex-tips/rust-v0.152.0.patch"
 
 # Given a BSD-like userland that rejects GNU-only flags.
 real_readlink=$(command -v readlink)
@@ -58,53 +38,92 @@ printf '%s\n' \
   'for arg in "$@"; do case "$arg" in -*T*) exit 64 ;; esac; done' \
   'exec "$CODEX_TIPS_TEST_REAL_MV" "$@"' >"$portable_bin/mv"
 chmod 0755 "$portable_bin/readlink" "$portable_bin/sort" "$portable_bin/mv"
-if grep -q 'mapfile' "$repo_root/bin/install-codex-tips"; then
+if grep -q 'mapfile' "$installer"; then
   printf 'installer must remain compatible with the Bash shipped by macOS\n' >&2
   exit 1
 fi
 
-# When the existing install is repaired through the public Unix installer.
-install_output=$(env \
-  PATH="$portable_bin:$fixture/bin:$PATH" \
-  CODEX_TIPS_TEST_REAL_READLINK="$real_readlink" \
-  CODEX_TIPS_TEST_REAL_SORT="$real_sort" \
-  CODEX_TIPS_TEST_REAL_MV="$real_mv" \
-  CODEX_TIPS_INSTALL_ROOT="$install_root" \
-  CODEX_TIPS_LINK="$stable_link" \
-  CODEX_TIPS_ALIAS="$codex_alias" \
-  "$repo_root/bin/install-codex-tips")
+exercise_fast_path() {
+  local version=$1
+  local case_root="$fixture/version-$version"
+  local package_root="$case_root/npm/lib/node_modules/@openai/codex"
+  local launcher="$package_root/bin/codex.js"
+  local runtime_root="$package_root/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl"
+  local runtime_bin="$runtime_root/bin"
+  local host_source="$runtime_bin/codex-code-mode-host"
+  local bwrap_source="$runtime_root/codex-resources/bwrap"
+  local rg_source="$runtime_root/codex-path/rg"
+  local manifest_source="$runtime_root/codex-package.json"
+  local install_root="$case_root/install"
+  local installed_dir="$install_root/$version"
+  local installed_binary="$installed_dir/bin/codex"
+  local stable_link="$case_root/prefix/bin/codex-tips"
+  local codex_alias="$case_root/prefix/bin/codex"
+  local install_output
 
-# Then the complete runtime package is present and launchers target the patched binary.
-cmp "$host_source" "$installed_dir/bin/codex-code-mode-host"
-cmp "$bwrap_source" "$installed_dir/codex-resources/bwrap"
-cmp "$rg_source" "$installed_dir/codex-path/rg"
-cmp "$manifest_source" "$installed_dir/codex-package.json"
-test -x "$installed_dir/bin/codex-code-mode-host"
-test "$(readlink "$stable_link")" = "$installed_binary"
-test "$(readlink "$codex_alias")" = "$stable_link"
-test "$("$codex_alias" --version)" = 'codex-cli 0.152.0'
-[[ $install_output == *"run \`hash -r\` in long-lived Bash shells"* ]]
+  mkdir -p \
+    "$(dirname "$launcher")" \
+    "$runtime_bin" \
+    "$(dirname "$bwrap_source")" \
+    "$(dirname "$rg_source")" \
+    "$(dirname "$installed_binary")" \
+    "$case_root/bin"
+  printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'codex-cli $version'" >"$launcher"
+  printf '%s\n' 'host fixture' >"$host_source"
+  printf '%s\n' 'bwrap fixture' >"$bwrap_source"
+  printf '%s\n' 'rg fixture' >"$rg_source"
+  printf '{"layoutVersion":1,"version":"%s"}\n' "$version" >"$manifest_source"
+  cp "$launcher" "$runtime_bin/codex"
+  chmod 0755 "$launcher" "$runtime_bin/codex" "$host_source" "$bwrap_source" "$rg_source"
+  cp "$launcher" "$installed_binary"
+  ln -s "$launcher" "$case_root/bin/codex"
 
-# Given the fast-path installation loses runtime support files.
-rm "$installed_dir/bin/codex-code-mode-host" "$installed_dir/codex-resources/bwrap"
-# When the installer repairs the existing installation.
-env \
-  PATH="$portable_bin:$fixture/prefix/bin:$fixture/bin:$PATH" \
-  CODEX_TIPS_TEST_REAL_READLINK="$real_readlink" \
-  CODEX_TIPS_TEST_REAL_SORT="$real_sort" \
-  CODEX_TIPS_TEST_REAL_MV="$real_mv" \
-  CODEX_TIPS_INSTALL_ROOT="$install_root" \
-  CODEX_TIPS_LINK="$stable_link" \
-  CODEX_TIPS_ALIAS="$codex_alias" \
-  "$repo_root/bin/install-codex-tips" >/dev/null
+  # When the existing versioned install is repaired through the public Unix installer.
+  install_output=$(env \
+    PATH="$portable_bin:$case_root/bin:$PATH" \
+    CODEX_TIPS_TEST_REAL_READLINK="$real_readlink" \
+    CODEX_TIPS_TEST_REAL_SORT="$real_sort" \
+    CODEX_TIPS_TEST_REAL_MV="$real_mv" \
+    CODEX_TIPS_INSTALL_ROOT="$install_root" \
+    CODEX_TIPS_LINK="$stable_link" \
+    CODEX_TIPS_ALIAS="$codex_alias" \
+    "$installer")
 
-# Then both files are restored without replacing the patched binary.
-cmp "$host_source" "$installed_dir/bin/codex-code-mode-host"
-cmp "$bwrap_source" "$installed_dir/codex-resources/bwrap"
-test "$("$installed_binary" --version)" = 'codex-cli 0.152.0'
+  # Then the matching package is selected and runtime support remains complete.
+  cmp "$host_source" "$installed_dir/bin/codex-code-mode-host"
+  cmp "$bwrap_source" "$installed_dir/codex-resources/bwrap"
+  cmp "$rg_source" "$installed_dir/codex-path/rg"
+  cmp "$manifest_source" "$installed_dir/codex-package.json"
+  test -x "$installed_dir/bin/codex-code-mode-host"
+  test "$(readlink "$stable_link")" = "$installed_binary"
+  test "$(readlink "$codex_alias")" = "$stable_link"
+  test "$("$codex_alias" --version)" = "codex-cli $version"
+  [[ $install_output == *"run \`hash -r\` in long-lived Bash shells"* ]]
+
+  # Given the fast-path installation loses runtime support files.
+  rm "$installed_dir/bin/codex-code-mode-host" "$installed_dir/codex-resources/bwrap"
+  # When the installer repairs the existing installation again.
+  env \
+    PATH="$portable_bin:$case_root/prefix/bin:$case_root/bin:$PATH" \
+    CODEX_TIPS_TEST_REAL_READLINK="$real_readlink" \
+    CODEX_TIPS_TEST_REAL_SORT="$real_sort" \
+    CODEX_TIPS_TEST_REAL_MV="$real_mv" \
+    CODEX_TIPS_INSTALL_ROOT="$install_root" \
+    CODEX_TIPS_LINK="$stable_link" \
+    CODEX_TIPS_ALIAS="$codex_alias" \
+    "$installer" >/dev/null
+
+  # Then both files are restored without replacing the selected patched binary.
+  cmp "$host_source" "$installed_dir/bin/codex-code-mode-host"
+  cmp "$bwrap_source" "$installed_dir/codex-resources/bwrap"
+  test "$("$installed_binary" --version)" = "codex-cli $version"
+}
+
+exercise_fast_path 0.151.0
+exercise_fast_path 0.152.0
 
 # Given an installed Codex version without a matching release patch.
-unsupported_launcher="$fixture/bin/codex-unsupported"
+unsupported_launcher="$fixture/codex-unsupported"
 printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "codex-cli 0.153.0"' >"$unsupported_launcher"
 chmod 0755 "$unsupported_launcher"
 
@@ -121,8 +140,8 @@ if unsupported_output=$(env \
   CODEX_TIPS_LINK="$fixture/unsupported-prefix/codex-tips" \
   CODEX_TIPS_ALIAS="$fixture/unsupported-prefix/codex" \
   CODEX_TIPS_UPSTREAM="$fixture/missing-upstream" \
-  "$repo_root/bin/install-codex-tips" 2>&1); then
+  "$installer" 2>&1); then
   printf 'expected unsupported Codex version to fail\n' >&2
   exit 1
 fi
-[[ $unsupported_output == *'unsupported Codex version 0.153.0'* ]]
+[[ $unsupported_output == *'unsupported Codex version 0.153.0; supported versions: 0.151.0, 0.152.0'* ]]

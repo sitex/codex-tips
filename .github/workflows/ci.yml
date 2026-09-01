@@ -34,10 +34,19 @@ jobs:
   patch:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: "0.151.0"
+            commit: 78c290807ce710180111df227df3b7a4fe845452
+          - version: "0.152.0"
+            commit: 316795b3cf2a45e90d121d9f46499d4658b2645c
     steps:
       - uses: actions/checkout@v4
       - name: Check pinned upstream patch
         run: |
-          git clone --depth 1 --branch rust-v0.152.0 https://github.com/openai/codex.git /tmp/codex-tips-upstream
-          test "$(git -C /tmp/codex-tips-upstream rev-parse HEAD)" = 316795b3cf2a45e90d121d9f46499d4658b2645c
-          git -C /tmp/codex-tips-upstream apply --check "$GITHUB_WORKSPACE/patches/codex-tips/rust-v0.152.0.patch"
+          checkout="/tmp/codex-tips-upstream-${{ matrix.version }}"
+          git clone --depth 1 --branch "rust-v${{ matrix.version }}" https://github.com/openai/codex.git "$checkout"
+          test "$(git -C "$checkout" rev-parse HEAD)" = "${{ matrix.commit }}"
+          git -C "$checkout" apply --check "$GITHUB_WORKSPACE/patches/codex-tips/rust-v${{ matrix.version }}.patch"

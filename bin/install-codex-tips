@@ -103,7 +103,9 @@ if [[ ! -f $patch_file ]]; then
   known_versions=
   for known_patch in "$patch_dir"/rust-v*.patch; do
     [[ -f $known_patch ]] || continue
-    known_version=$(printf '%s\n' "$known_patch" | sed -E 's#^.*/rust-v([0-9]+\.[0-9]+\.[0-9]+)\.patch$#\1#')
+    known_patch_name=${known_patch##*/}
+    [[ $known_patch_name =~ ^rust-v([0-9]+\.[0-9]+\.[0-9]+)\.patch$ ]] || continue
+    known_version=${BASH_REMATCH[1]}
     if [[ -n $known_versions ]]; then
       known_versions="$known_versions, $known_version"
     else
@@ -115,6 +117,7 @@ if [[ ! -f $patch_file ]]; then
 fi
 
 case "$codex_tag" in
+  rust-v0.151.0) expected_upstream_commit=78c290807ce710180111df227df3b7a4fe845452 ;;
   rust-v0.152.0) expected_upstream_commit=316795b3cf2a45e90d121d9f46499d4658b2645c ;;
   *) die "missing trusted upstream commit for $codex_tag" ;;
 esac
