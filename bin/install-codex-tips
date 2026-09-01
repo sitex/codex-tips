@@ -115,7 +115,7 @@ if [[ ! -f $patch_file ]]; then
 fi
 
 case "$codex_tag" in
-  rust-v0.151.0) expected_upstream_commit=78c290807ce710180111df227df3b7a4fe845452 ;;
+  rust-v0.152.0) expected_upstream_commit=316795b3cf2a45e90d121d9f46499d4658b2645c ;;
   *) die "missing trusted upstream commit for $codex_tag" ;;
 esac
 

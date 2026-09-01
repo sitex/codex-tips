@@ -38,6 +38,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check pinned upstream patch
         run: |
-          git clone --depth 1 --branch rust-v0.151.0 https://github.com/openai/codex.git /tmp/codex-tips-upstream
-          test "$(git -C /tmp/codex-tips-upstream rev-parse HEAD)" = 78c290807ce710180111df227df3b7a4fe845452
-          git -C /tmp/codex-tips-upstream apply --check "$GITHUB_WORKSPACE/patches/codex-tips/rust-v0.151.0.patch"
+          git clone --depth 1 --branch rust-v0.152.0 https://github.com/openai/codex.git /tmp/codex-tips-upstream
+          test "$(git -C /tmp/codex-tips-upstream rev-parse HEAD)" = 316795b3cf2a45e90d121d9f46499d4658b2645c
+          git -C /tmp/codex-tips-upstream apply --check "$GITHUB_WORKSPACE/patches/codex-tips/rust-v0.152.0.patch"

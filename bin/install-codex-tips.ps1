@@ -135,10 +135,10 @@ $codexVersion = $Matches[1]
 $codexTag = "rust-v$codexVersion"
 $patchFile = Join-Path (Split-Path -Parent $PSScriptRoot) "patches\codex-tips\$codexTag.patch"
 if (-not (Test-Path -LiteralPath $patchFile -PathType Leaf)) {
-    Fail "unsupported Codex version $codexVersion; supported versions: 0.151.0"
+    Fail "unsupported Codex version $codexVersion; supported versions: 0.152.0"
 }
 $expectedCommit = switch ($codexTag) {
-    "rust-v0.151.0" { "78c290807ce710180111df227df3b7a4fe845452" }
+    "rust-v0.152.0" { "316795b3cf2a45e90d121d9f46499d4658b2645c" }
     default { Fail "missing trusted upstream commit for $codexTag" }
 }
 

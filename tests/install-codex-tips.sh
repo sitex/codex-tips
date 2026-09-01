@@ -14,7 +14,7 @@ bwrap_source="$runtime_root/codex-resources/bwrap"
 rg_source="$runtime_root/codex-path/rg"
 manifest_source="$runtime_root/codex-package.json"
 install_root="$fixture/install"
-installed_dir="$install_root/0.151.0"
+installed_dir="$install_root/0.152.0"
 installed_binary="$installed_dir/bin/codex"
 stable_link="$fixture/prefix/bin/codex-tips"
 codex_alias="$fixture/prefix/bin/codex"
@@ -28,11 +28,11 @@ mkdir -p \
   "$(dirname "$installed_binary")" \
   "$fixture/bin" \
   "$portable_bin"
-printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "codex-cli 0.151.0"' >"$launcher"
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "codex-cli 0.152.0"' >"$launcher"
 printf '%s\n' 'host fixture' >"$host_source"
 printf '%s\n' 'bwrap fixture' >"$bwrap_source"
 printf '%s\n' 'rg fixture' >"$rg_source"
-printf '%s\n' '{"layoutVersion":1,"version":"0.151.0"}' >"$manifest_source"
+printf '%s\n' '{"layoutVersion":1,"version":"0.152.0"}' >"$manifest_source"
 cp "$launcher" "$runtime_bin/codex"
 chmod 0755 "$launcher" "$runtime_bin/codex" "$host_source" "$bwrap_source" "$rg_source"
 cp "$launcher" "$installed_binary"
@@ -82,7 +82,7 @@ cmp "$manifest_source" "$installed_dir/codex-package.json"
 test -x "$installed_dir/bin/codex-code-mode-host"
 test "$(readlink "$stable_link")" = "$installed_binary"
 test "$(readlink "$codex_alias")" = "$stable_link"
-test "$("$codex_alias" --version)" = 'codex-cli 0.151.0'
+test "$("$codex_alias" --version)" = 'codex-cli 0.152.0'
 [[ $install_output == *"run \`hash -r\` in long-lived Bash shells"* ]]
 
 # Given the fast-path installation loses runtime support files.
@@ -101,11 +101,11 @@ env \
 # Then both files are restored without replacing the patched binary.
 cmp "$host_source" "$installed_dir/bin/codex-code-mode-host"
 cmp "$bwrap_source" "$installed_dir/codex-resources/bwrap"
-test "$("$installed_binary" --version)" = 'codex-cli 0.151.0'
+test "$("$installed_binary" --version)" = 'codex-cli 0.152.0'
 
 # Given an installed Codex version without a matching release patch.
 unsupported_launcher="$fixture/bin/codex-unsupported"
-printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "codex-cli 0.152.0"' >"$unsupported_launcher"
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "codex-cli 0.153.0"' >"$unsupported_launcher"
 chmod 0755 "$unsupported_launcher"
 
 # When installation is attempted, then it fails before fetching or building upstream.
@@ -125,4 +125,4 @@ if unsupported_output=$(env \
   printf 'expected unsupported Codex version to fail\n' >&2
   exit 1
 fi
-[[ $unsupported_output == *'unsupported Codex version 0.152.0'* ]]
+[[ $unsupported_output == *'unsupported Codex version 0.153.0'* ]]
