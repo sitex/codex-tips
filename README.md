@@ -5,26 +5,27 @@ user's likely next prompt after a completed turn and displays it as dim text in
 the empty composer.
 
 Press `Tab` or Right Arrow to copy the suggestion into the editable input without
-sending it. Press `Enter` only after accepting it to submit. Typing normally,
-starting another turn, or changing state dismisses a stale suggestion.
+sending it. Press `Enter` only after accepting it to submit. Typing temporarily
+hides the current suggestion; clearing the composer restores it. A truly stale
+suggestion or one invalidated by a new turn is discarded instead.
 
 This is an independent community project. It is not affiliated with or supported
 by OpenAI.
 
 ## Compatibility
 
-Release 0.2.0 supports exactly Codex CLI `0.151.0` (`rust-v0.151.0`, upstream
-commit `78c290807ce710180111df227df3b7a4fe845452`). The installer refuses other
+Release 0.2.0 supports exactly Codex CLI `0.152.0` (`rust-v0.152.0`, upstream
+commit `316795b3cf2a45e90d121d9f46499d4658b2645c`). The installer refuses other
 versions instead of attempting an unverified patch port.
 
-The release is tested on x86_64 Linux, macOS, and native Windows. ARM64 packages
-exist upstream but are not release-gated by this project yet. The installer builds
-Codex from source, so installation can take several minutes and use several
-gigabytes of disk.
+The release is tested on x86_64 builds of Linux, macOS, and native Windows. ARM64
+packages exist upstream but are not release-gated by this project yet. The
+installer builds Codex from source, so installation can take several minutes and
+use several gigabytes of disk.
 
 Requirements:
 
-- the official Codex CLI 0.151.0 installation;
+- the official Codex CLI 0.152.0 installation;
 - Git;
 - Rust and Cargo compatible with the upstream `rust-toolchain.toml`;
 - Bash 3.2 or newer on Linux and macOS, or PowerShell 7 on Windows.
@@ -116,7 +117,7 @@ readlink ~/.local/bin/codex-tips
 ```
 
 If they point to the paths installed above, remove those two links and the matching
-`~/.local/lib/codex-tips/0.151.0/` directory. Then ensure the official Codex launcher
+`~/.local/lib/codex-tips/0.152.0/` directory. Then ensure the official Codex launcher
 is next on `PATH` and run `hash -r`.
 
 On Windows, inspect and remove the managed `codex.cmd` and `codex-tips.cmd` files
@@ -141,9 +142,9 @@ pwsh -NoProfile -File tests\install-codex-tips.ps1
 Verify the patch against the pinned upstream checkout:
 
 ```bash
-git clone --depth 1 --branch rust-v0.151.0 https://github.com/openai/codex.git /tmp/codex-tips-upstream
-test "$(git -C /tmp/codex-tips-upstream rev-parse HEAD)" = 78c290807ce710180111df227df3b7a4fe845452
-git -C /tmp/codex-tips-upstream apply --check "$PWD/patches/codex-tips/rust-v0.151.0.patch"
+git clone --depth 1 --branch rust-v0.152.0 https://github.com/openai/codex.git /tmp/codex-tips-upstream
+test "$(git -C /tmp/codex-tips-upstream rev-parse HEAD)" = 316795b3cf2a45e90d121d9f46499d4658b2645c
+git -C /tmp/codex-tips-upstream apply --check "$PWD/patches/codex-tips/rust-v0.152.0.patch"
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the release gates.

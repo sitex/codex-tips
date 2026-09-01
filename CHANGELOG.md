@@ -8,13 +8,15 @@ All notable changes to this project are documented here.
 
 ### Added
 
-- Support source builds and managed launchers on x86_64 macOS and native Windows.
+- Support source builds and managed launchers on x86_64 macOS and x86_64 native Windows.
 - Add a native PowerShell installer and Windows installer regression.
 - Add a Codex/LLM-guided installation checklist with compatibility and checksum safeguards.
 - Exercise Unix installers on Linux and macOS in CI, with manual full-build gates for all three supported operating systems.
 
 ### Changed
 
+- Rebase the downstream patch to Codex CLI 0.152.0 (`rust-v0.152.0`) at upstream commit `316795b3cf2a45e90d121d9f46499d4658b2645c`.
+- Temporarily hide the current suggestion while typing and restore it when the composer is cleared; discard it when it is truly stale or invalidated by a new turn.
 - Install the complete official platform runtime package while replacing only the patched `codex` binary.
 - Restore bundled helpers such as `bwrap`, ripgrep, code mode, and Windows sandbox executables on fast-path installs.
 - Make the Unix installer compatible with the Bash and BSD userland shipped by macOS.
