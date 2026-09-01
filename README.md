@@ -31,6 +31,9 @@ Requirements:
 
 ## Install 0.2.0
 
+Prefer an agent-guided setup? Ask your coding LLM to follow
+[Install with an LLM](INSTALL_WITH_LLM.md).
+
 Download both assets from the
 [v0.2.0 release](https://github.com/sitex/codex-tips/releases/tag/v0.2.0):
 
