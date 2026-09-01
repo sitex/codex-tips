@@ -196,16 +196,17 @@ sync_runtime_support() {
 runtime_package=$(find_runtime_package)
 
 install_launchers() {
-  local alias_dir alias_tmp link_dir link_target link_tmp
+  local alias_dir alias_tmp link_dir link_target link_tmp resolved_install_root
 
   link_dir=$(dirname "$launcher_link")
   install -d "$link_dir"
+  resolved_install_root=$(resolve_path "$install_root")
   if [[ -e $launcher_link || -L $launcher_link ]]; then
     [[ -L $launcher_link ]] \
       || die "refusing to replace existing codex-tips command: $launcher_link"
     link_target=$(resolve_path "$launcher_link" 2>/dev/null || true)
     case "$link_target" in
-      "$install_root"/*/codex | "$install_root"/*/bin/codex) ;;
+      "$resolved_install_root"/*/codex | "$resolved_install_root"/*/bin/codex) ;;
       *) die "refusing to replace unmanaged codex-tips link: $launcher_link" ;;
     esac
   fi

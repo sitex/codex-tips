@@ -76,6 +76,7 @@ try {
     if (($unsupportedOutput | Out-String) -notmatch "unsupported Codex version 0.152.0") {
         throw "unsupported version failure did not explain the compatibility boundary"
     }
+    $global:LASTEXITCODE = 0
 } finally {
     Remove-Item Env:CODEX_TIPS_CODEX -ErrorAction SilentlyContinue
     Remove-Item Env:CODEX_TIPS_RUNTIME_PACKAGE -ErrorAction SilentlyContinue
