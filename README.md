@@ -12,6 +12,22 @@ suggestion or one invalidated by a new turn is discarded instead.
 This is an independent community project. It is not affiliated with or supported
 by OpenAI.
 
+## Manual `$tip` command
+
+The repository also includes an optional Codex skill for requesting the same
+style of prediction explicitly. Copy [`skills/tip`](skills/tip) to
+`$CODEX_HOME/skills/tip` (normally `~/.codex/skills/tip`), restart Codex, and
+invoke:
+
+```text
+$tip
+```
+
+`$tip` returns only one short input that you are likely to type next, based on
+the visible conversation. It does not run tools, submit the prediction, or
+perform the suggested action. The skill works independently of the patched TUI;
+the patch continues to generate and display suggestions automatically.
+
 ## Compatibility
 
 Release 0.2.0 supports these exact Codex CLI versions:
