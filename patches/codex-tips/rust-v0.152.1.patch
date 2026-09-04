@@ -1,0 +1,2664 @@
+diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
+index f9735b4afd523c79cfc7aa126d5fa9dec7dfee48..df643a8f3e6c94b8b890a0bf6a4c5dea0b0f8da1 100644
+--- a/codex-rs/app-server-protocol/src/protocol/common.rs
++++ b/codex-rs/app-server-protocol/src/protocol/common.rs
+@@ -788,6 +788,13 @@ client_request_definitions! {
+         serialization: thread_id(params.thread_id),
+         response: v2::ThreadReadResponse,
+     },
++    ThreadSuggestNextPrompt => "thread/suggestNextPrompt" {
++        params: v2::ThreadSuggestNextPromptParams,
++        // Hidden prediction must not queue an interactive turn behind sampling.
++        serialization: None,
++        response: v2::ThreadSuggestNextPromptResponse,
++    },
++    #[experimental("thread/turns/list")]
+     ThreadTurnsList => "thread/turns/list" {
+         params: v2::ThreadTurnsListParams,
+         // Explicitly concurrent: this primarily reads append-only rollout storage.
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
+index 5c1b1921245b31a254536d816e21ddaa73795e5b..9755f8793dc4bf9cd6727ce9afdda6d95a91cf6d 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
+@@ -1670,6 +1670,29 @@ pub struct ThreadReadResponse {
+     pub thread: Thread,
+ }
+ 
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(export_to = "v2/")]
++/// Requests a best-effort predicted next prompt for one loaded thread.
++pub struct ThreadSuggestNextPromptParams {
++    /// Thread whose completed prompt-visible history should be sampled.
++    pub thread_id: String,
++    /// Optional client token used to cancel an older in-flight suggestion request.
++    #[ts(optional = nullable)]
++    pub cancellation_token: Option<String>,
++    /// When true, cancel `cancellation_token` without sampling.
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub cancel: bool,
++}
++
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(export_to = "v2/")]
++/// Returns composer-ready text, or silence when no suggestion is suitable.
++pub struct ThreadSuggestNextPromptResponse {
++    pub suggestion: Option<String>,
++}
++
+ #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+ #[serde(rename_all = "camelCase")]
+ #[ts(export_to = "v2/")]
+diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
+index 5b99a2b2d0ab78d820b3294443930d1cca8ce884..e712e61a71da482b9053f14bfcc10b51f98323f9 100644
+--- a/codex-rs/app-server/README.md
++++ b/codex-rs/app-server/README.md
+@@ -184,6 +184,7 @@ Example with notification opt-out:
+ - `threadSection/delete` — delete an existing custom section and atomically return its member threads to the unsectioned list; returns `{}`. The built-in pinned section cannot be deleted.
+ - `thread/loaded/list` — list the thread ids currently loaded in memory.
+ - `thread/read` — read a stored thread by id without resuming it; optionally include turns via `includeTurns`. The returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded. For loaded threads, experimental clients can use `canAcceptDirectInput` to determine whether `turn/start` and `turn/steer` are accepted (`false` for parent-owned Multi-Agent V2 subagents); unloaded stored threads report `null` when that capability is unavailable.
++- `thread/suggestNextPrompt` — internal TUI helper that samples a filtered prompt prediction from a loaded thread without advancing it. Optional `cancellationToken` plus `cancel: true` stops an abandoned hidden request.
+ - `thread/turns/list` — page through a stored thread’s turn history without resuming it; supports cursor-based pagination with `sortDirection`, `itemsView`, `nextCursor`, and `backwardsCursor`.
+ - `thread/items/list` — page through persisted thread items without resuming the thread. Pass `turnId` to restrict results to one turn, or omit it to page items across the thread. The active thread store must support item pagination.
+ - `thread/searchOccurrences` — experimental; find literal, case-insensitive matches in visible user messages and summary-selected final assistant messages within one paginated thread.
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+index a4009236a2761c09172e527ba2edd576278fd173..1501a0b1da6fbf73d18b8fd2bb291fd42f790c28 100644
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -1331,6 +1331,9 @@ impl MessageProcessor {
+             ClientRequest::ThreadRead { params, .. } => {
+                 self.thread_processor.thread_read(&request_id, params).await
+             }
++            ClientRequest::ThreadSuggestNextPrompt { params, .. } => {
++                self.turn_processor.thread_suggest_next_prompt(params).await
++            }
+             ClientRequest::ThreadTurnsList { params, .. } => {
+                 self.thread_processor.thread_turns_list(params).await
+             }
+diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
+index b719b6a0b2cca44d866733220d98ae45f97f800f..0be80b81d56eb03fc2d0dc19a67b083e1d821bbb 100644
+--- a/codex-rs/app-server/src/request_processors.rs
++++ b/codex-rs/app-server/src/request_processors.rs
+@@ -284,6 +284,8 @@ use codex_app_server_protocol::ThreadStartParams;
+ use codex_app_server_protocol::ThreadStartResponse;
+ use codex_app_server_protocol::ThreadStartedNotification;
+ use codex_app_server_protocol::ThreadStatus;
++use codex_app_server_protocol::ThreadSuggestNextPromptParams;
++use codex_app_server_protocol::ThreadSuggestNextPromptResponse;
+ use codex_app_server_protocol::ThreadTimelineListParams;
+ use codex_app_server_protocol::ThreadTimelineListResponse;
+ use codex_app_server_protocol::ThreadTurnsListParams;
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index 84047d2d2fa98071fb7225459d881dba6e7d4af0..9922ea2ea2f8b4f08606ee00a22390c993c22915 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -82,6 +82,8 @@ pub(crate) struct TurnRequestProcessor {
+     config: Arc<Config>,
+     config_manager: ConfigManager,
+     pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
++    pending_next_prompt_suggestions:
++        Arc<Mutex<HashMap<NextPromptSuggestionCancellationKey, NextPromptSuggestionCancellation>>>,
+     thread_state_manager: ThreadStateManager,
+     thread_watch_manager: ThreadWatchManager,
+     thread_list_state_permit: Arc<Semaphore>,
+@@ -127,6 +129,41 @@ struct ThreadSettingsBuildParams {
+     personality: Option<Personality>,
+ }
+ 
++#[derive(Clone, Eq, Hash, PartialEq)]
++struct NextPromptSuggestionCancellationKey {
++    thread_id: String,
++    cancellation_token: String,
++}
++
++impl NextPromptSuggestionCancellationKey {
++    fn new(thread_id: &str, cancellation_token: &str) -> Self {
++        Self {
++            thread_id: thread_id.to_string(),
++            cancellation_token: cancellation_token.to_string(),
++        }
++    }
++}
++
++enum NextPromptSuggestionCancellation {
++    Active(Arc<CancellationToken>),
++    Cancelled { expires_at: std::time::Instant },
++    Retired { expires_at: std::time::Instant },
++}
++
++const NEXT_PROMPT_SUGGESTION_RETIRED_TOKEN_TTL: std::time::Duration =
++    std::time::Duration::from_secs(/*secs*/ 60);
++
++fn prune_expired_next_prompt_suggestions(
++    pending: &mut HashMap<NextPromptSuggestionCancellationKey, NextPromptSuggestionCancellation>,
++) {
++    let now = std::time::Instant::now();
++    pending.retain(|_, cancellation| match cancellation {
++        NextPromptSuggestionCancellation::Active(_) => true,
++        NextPromptSuggestionCancellation::Cancelled { expires_at }
++        | NextPromptSuggestionCancellation::Retired { expires_at } => *expires_at > now,
++    });
++}
++
+ impl TurnRequestProcessor {
+     #[allow(clippy::too_many_arguments)]
+     pub(crate) fn new(
+@@ -155,6 +192,7 @@ impl TurnRequestProcessor {
+             config,
+             config_manager,
+             pending_thread_unloads,
++            pending_next_prompt_suggestions: Arc::new(Mutex::new(HashMap::new())),
+             thread_state_manager,
+             thread_watch_manager,
+             thread_list_state_permit,
+@@ -191,6 +229,158 @@ impl TurnRequestProcessor {
+             .map(|response| Some(response.into()))
+     }
+ 
++    pub(crate) async fn thread_suggest_next_prompt(
++        &self,
++        params: ThreadSuggestNextPromptParams,
++    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
++        self.thread_suggest_next_prompt_inner(params)
++            .await
++            .map(|response| Some(response.into()))
++    }
++
++    async fn thread_suggest_next_prompt_inner(
++        &self,
++        params: ThreadSuggestNextPromptParams,
++    ) -> Result<ThreadSuggestNextPromptResponse, JSONRPCErrorError> {
++        let ThreadSuggestNextPromptParams {
++            thread_id,
++            cancellation_token,
++            cancel,
++        } = params;
++        let suggestion_cancellation = self
++            .next_prompt_suggestion_cancellation(&thread_id, cancellation_token.as_deref(), cancel)
++            .await?;
++        let Some(suggestion_cancellation) = suggestion_cancellation else {
++            return Ok(ThreadSuggestNextPromptResponse { suggestion: None });
++        };
++
++        let result = async {
++            let (_, thread) = self.load_thread(&thread_id).await?;
++            thread
++                .suggest_next_prompt(suggestion_cancellation.as_ref().clone())
++                .await
++                .map_err(|err| internal_error(format!("failed to suggest next prompt: {err}")))
++        }
++        .await;
++        self.clear_next_prompt_suggestion_cancellation(
++            &thread_id,
++            cancellation_token.as_deref(),
++            &suggestion_cancellation,
++        )
++        .await;
++        Ok(ThreadSuggestNextPromptResponse {
++            suggestion: result?,
++        })
++    }
++
++    async fn next_prompt_suggestion_cancellation(
++        &self,
++        thread_id: &str,
++        cancellation_token: Option<&str>,
++        cancel: bool,
++    ) -> Result<Option<Arc<CancellationToken>>, JSONRPCErrorError> {
++        let Some(cancellation_token) = cancellation_token else {
++            if cancel {
++                return Err(invalid_request(
++                    "cancellationToken is required when cancel is true",
++                ));
++            }
++            return Ok(Some(Arc::new(CancellationToken::new())));
++        };
++
++        let mut pending = self.pending_next_prompt_suggestions.lock().await;
++        prune_expired_next_prompt_suggestions(&mut pending);
++        let key = NextPromptSuggestionCancellationKey::new(thread_id, cancellation_token);
++        if cancel {
++            match pending.remove(&key) {
++                Some(NextPromptSuggestionCancellation::Active(existing)) => {
++                    existing.cancel();
++                    pending.insert(
++                        key,
++                        NextPromptSuggestionCancellation::Retired {
++                            expires_at: std::time::Instant::now()
++                                + NEXT_PROMPT_SUGGESTION_RETIRED_TOKEN_TTL,
++                        },
++                    );
++                }
++                Some(NextPromptSuggestionCancellation::Cancelled { expires_at }) => {
++                    pending.insert(
++                        key,
++                        NextPromptSuggestionCancellation::Cancelled { expires_at },
++                    );
++                }
++                Some(NextPromptSuggestionCancellation::Retired { expires_at }) => {
++                    pending.insert(
++                        key,
++                        NextPromptSuggestionCancellation::Retired { expires_at },
++                    );
++                }
++                None => {
++                    pending.insert(
++                        key,
++                        NextPromptSuggestionCancellation::Cancelled {
++                            expires_at: std::time::Instant::now()
++                                + NEXT_PROMPT_SUGGESTION_RETIRED_TOKEN_TTL,
++                        },
++                    );
++                }
++            }
++            return Ok(None);
++        }
++
++        match pending.remove(&key) {
++            Some(NextPromptSuggestionCancellation::Active(existing)) => existing.cancel(),
++            Some(NextPromptSuggestionCancellation::Cancelled { .. }) => {
++                pending.insert(
++                    key,
++                    NextPromptSuggestionCancellation::Retired {
++                        expires_at: std::time::Instant::now()
++                            + NEXT_PROMPT_SUGGESTION_RETIRED_TOKEN_TTL,
++                    },
++                );
++                return Ok(None);
++            }
++            Some(NextPromptSuggestionCancellation::Retired { .. }) | None => {}
++        }
++
++        let cancellation = Arc::new(CancellationToken::new());
++        pending.insert(
++            key,
++            NextPromptSuggestionCancellation::Active(Arc::clone(&cancellation)),
++        );
++        Ok(Some(cancellation))
++    }
++
++    async fn clear_next_prompt_suggestion_cancellation(
++        &self,
++        thread_id: &str,
++        cancellation_token: Option<&str>,
++        suggestion_cancellation: &Arc<CancellationToken>,
++    ) {
++        let Some(cancellation_token) = cancellation_token else {
++            return;
++        };
++
++        let mut pending = self.pending_next_prompt_suggestions.lock().await;
++        prune_expired_next_prompt_suggestions(&mut pending);
++        let key = NextPromptSuggestionCancellationKey::new(thread_id, cancellation_token);
++        if pending.get(&key).is_some_and(|current| match current {
++            NextPromptSuggestionCancellation::Active(current) => {
++                Arc::ptr_eq(current, suggestion_cancellation)
++            }
++            NextPromptSuggestionCancellation::Cancelled { .. }
++            | NextPromptSuggestionCancellation::Retired { .. } => false,
++        }) {
++            pending.insert(
++                key,
++                NextPromptSuggestionCancellation::Retired {
++                    expires_at: std::time::Instant::now()
++                        + NEXT_PROMPT_SUGGESTION_RETIRED_TOKEN_TTL,
++                },
++            );
++        }
++    }
++
+     pub(crate) async fn thread_settings_update(
+         &self,
+         request_id: &ConnectionRequestId,
+diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
+index 7ea4813a713c6ee02d229386cd58136a161b6831..5ef388fecb5bff6417385101847efd60ee274ccd 100644
+--- a/codex-rs/app-server/tests/suite/v2/mod.rs
++++ b/codex-rs/app-server/tests/suite/v2/mod.rs
+@@ -112,6 +112,7 @@ mod thread_settings_update;
+ mod thread_shell_command;
+ mod thread_start;
+ mod thread_status;
++mod thread_suggest_next_prompt;
+ mod thread_timeline;
+ mod thread_unarchive;
+ mod thread_unsubscribe;
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_suggest_next_prompt.rs b/codex-rs/app-server/tests/suite/v2/thread_suggest_next_prompt.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8140fb77ec9ce24eecb7725bf4a4522392e0d603
+--- /dev/null
++++ b/codex-rs/app-server/tests/suite/v2/thread_suggest_next_prompt.rs
+@@ -0,0 +1,171 @@
++use anyhow::Result;
++use app_test_support::MockResponsesConfig;
++use app_test_support::TestAppServer;
++use codex_app_server_protocol::ThreadInjectItemsParams;
++use codex_app_server_protocol::ThreadInjectItemsResponse;
++use codex_app_server_protocol::ThreadStartParams;
++use codex_app_server_protocol::ThreadStartResponse;
++use codex_app_server_protocol::ThreadSuggestNextPromptResponse;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::ResponseItem;
++use core_test_support::responses;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++use tempfile::TempDir;
++use tokio::time::sleep;
++use tokio::time::timeout;
++
++const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(/*secs*/ 10);
++
++#[tokio::test]
++async fn thread_suggest_next_prompt_samples_loaded_history() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let response_mock = responses::mount_sse_once(
++        &server,
++        responses::sse(vec![
++            responses::ev_response_created("resp-1"),
++            responses::ev_assistant_message("msg-1", "run the tests"),
++            responses::ev_completed("resp-1"),
++        ]),
++    )
++    .await;
++    let codex_home = TempDir::new()?;
++    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
++    let mut app = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .build_initialized_with_timeout(READ_TIMEOUT)
++        .await?;
++    let thread_id = start_thread_with_history(&mut app).await?;
++
++    let request_id = app
++        .send_raw_request(
++            "thread/suggestNextPrompt",
++            Some(json!({ "threadId": thread_id })),
++        )
++        .await?;
++    let response: ThreadSuggestNextPromptResponse =
++        timeout(READ_TIMEOUT, app.read_response(request_id)).await??;
++
++    assert_eq!(response.suggestion.as_deref(), Some("run the tests"));
++    let request = response_mock.single_request();
++    assert_eq!(request.body_json()["tools"], json!([]));
++    assert_eq!(request.body_json()["max_output_tokens"], json!(32));
++    Ok(())
++}
++
++#[tokio::test]
++async fn thread_suggest_next_prompt_cancel_stops_in_flight_sampling() -> Result<()> {
++    let server = responses::start_mock_server().await;
++    let body = responses::sse(vec![
++        responses::ev_response_created("resp-1"),
++        responses::ev_assistant_message("msg-1", "run the tests"),
++        responses::ev_completed("resp-1"),
++    ]);
++    let response_mock = responses::mount_response_once(
++        &server,
++        responses::sse_response(body).set_delay(std::time::Duration::from_secs(/*secs*/ 5)),
++    )
++    .await;
++    let codex_home = TempDir::new()?;
++    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
++    let mut app = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .build_initialized_with_timeout(READ_TIMEOUT)
++        .await?;
++    let thread_id = start_thread_with_history(&mut app).await?;
++    let cancellation_token = "next-prompt-suggestion-test";
++
++    let suggestion_request_id = app
++        .send_raw_request(
++            "thread/suggestNextPrompt",
++            Some(json!({
++                "threadId": thread_id,
++                "cancellationToken": cancellation_token,
++            })),
++        )
++        .await?;
++    wait_for_request_count(&response_mock, /*expected*/ 1).await?;
++    let cancel_request_id = app
++        .send_raw_request(
++            "thread/suggestNextPrompt",
++            Some(json!({
++                "threadId": thread_id,
++                "cancellationToken": cancellation_token,
++                "cancel": true,
++            })),
++        )
++        .await?;
++
++    let cancel_response: ThreadSuggestNextPromptResponse =
++        timeout(READ_TIMEOUT, app.read_response(cancel_request_id)).await??;
++    assert_eq!(cancel_response.suggestion, None);
++    let suggestion_response: ThreadSuggestNextPromptResponse =
++        timeout(READ_TIMEOUT, app.read_response(suggestion_request_id)).await??;
++    assert_eq!(suggestion_response.suggestion, None);
++    assert_eq!(response_mock.requests().len(), 1);
++    Ok(())
++}
++
++async fn start_thread_with_history(app: &mut TestAppServer) -> Result<String> {
++    let thread_request_id = app
++        .send_thread_start_request_with_auto_env(ThreadStartParams {
++            model: Some("mock-model".to_string()),
++            ..Default::default()
++        })
++        .await?;
++    let ThreadStartResponse { thread, .. } =
++        timeout(READ_TIMEOUT, app.read_response(thread_request_id)).await??;
++    let items = vec![
++        message("user", "fix the bug"),
++        message("assistant", "I fixed it"),
++        message("user", "continue"),
++        message("assistant", "The change is ready"),
++    ];
++    let inject_request_id = app
++        .send_thread_inject_items_request(ThreadInjectItemsParams {
++            thread_id: thread.id.clone(),
++            items: items
++                .into_iter()
++                .map(serde_json::to_value)
++                .collect::<serde_json::Result<Vec<_>>>()?,
++        })
++        .await?;
++    let _: ThreadInjectItemsResponse =
++        timeout(READ_TIMEOUT, app.read_response(inject_request_id)).await??;
++    Ok(thread.id)
++}
++
++async fn wait_for_request_count(
++    response_mock: &core_test_support::responses::ResponseMock,
++    expected: usize,
++) -> Result<()> {
++    timeout(READ_TIMEOUT, async {
++        loop {
++            if response_mock.requests().len() >= expected {
++                return;
++            }
++            sleep(std::time::Duration::from_millis(/*millis*/ 10)).await;
++        }
++    })
++    .await?;
++    Ok(())
++}
++
++fn message(role: &str, text: &str) -> ResponseItem {
++    let content = if role == "assistant" {
++        ContentItem::OutputText {
++            text: text.to_string(),
++        }
++    } else {
++        ContentItem::InputText {
++            text: text.to_string(),
++        }
++    };
++    ResponseItem::Message {
++        id: None,
++        role: role.to_string(),
++        content: vec![content],
++        phase: None,
++        internal_chat_message_metadata_passthrough: None,
++    }
++}
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index 5adfe8db6a013a0f3e434445eda0378e0f4962ee..2245f05211fc797c883ebd7e6bfd92211a2e546e 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -288,6 +288,8 @@ pub struct ResponsesApiRequest {
+     pub stream_options: Option<StreamOptions>,
+     pub include: Vec<String>,
+     #[serde(skip_serializing_if = "Option::is_none")]
++    pub max_output_tokens: Option<u64>,
++    #[serde(skip_serializing_if = "Option::is_none")]
+     pub service_tier: Option<String>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub prompt_cache_key: Option<String>,
+@@ -314,6 +316,7 @@ impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
+             stream: request.stream,
+             stream_options: request.stream_options.as_ref(),
+             include: &request.include,
++            max_output_tokens: request.max_output_tokens,
+             service_tier: request.service_tier.as_deref(),
+             prompt_cache_key: request.prompt_cache_key.as_deref(),
+             text: request.text.as_ref(),
+@@ -343,6 +346,8 @@ pub struct ResponseCreateWsRequest<'a> {
+     pub stream_options: Option<&'a StreamOptions>,
+     pub include: &'a [String],
+     #[serde(skip_serializing_if = "Option::is_none")]
++    pub max_output_tokens: Option<u64>,
++    #[serde(skip_serializing_if = "Option::is_none")]
+     pub service_tier: Option<&'a str>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub prompt_cache_key: Option<&'a str>,
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..6a1bf1c091c338b435e22ada26b177875ca62768 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -969,6 +969,7 @@ mod tests {
+             stream: true,
+             stream_options: None,
+             include: vec!["reasoning.encrypted_content".to_string()],
++            max_output_tokens: None,
+             service_tier: Some("priority".to_string()),
+             prompt_cache_key: Some("cache-key".to_string()),
+             text: None,
+diff --git a/codex-rs/codex-api/tests/clients.rs b/codex-rs/codex-api/tests/clients.rs
+index af43022417fdc046726280f237c7e39a1195eaff..fe157bf05005f80b209ee44739daa3319b10c5fe 100644
+--- a/codex-rs/codex-api/tests/clients.rs
++++ b/codex-rs/codex-api/tests/clients.rs
+@@ -350,6 +350,7 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
+         stream: true,
+         stream_options: None,
+         include: Vec::new(),
++        max_output_tokens: None,
+         service_tier: None,
+         prompt_cache_key: None,
+         text: None,
+@@ -438,6 +439,7 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
+         stream: true,
+         stream_options: None,
+         include: Vec::new(),
++        max_output_tokens: None,
+         service_tier: None,
+         prompt_cache_key: None,
+         text: None,
+@@ -559,6 +561,7 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
+         stream: true,
+         stream_options: None,
+         include: Vec::new(),
++        max_output_tokens: None,
+         service_tier: None,
+         prompt_cache_key: None,
+         text: None,
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 9f03c939e09c87824aabb6108c051786908d6204..5a93a6a53e5f39d180c553dbeaa46c3399416dc0 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -315,6 +315,7 @@ pub struct ModelClient {
+ pub struct ModelClientSession {
+     client: ModelClient,
+     websocket_session: WebsocketSession,
++    websocket_session_cache_mode: WebsocketSessionCacheMode,
+     /// Turn state for sticky routing.
+     ///
+     /// This is an `OnceLock` that stores the turn state value received from the server
+@@ -328,6 +329,12 @@ pub struct ModelClientSession {
+     turn_state: Arc<OnceLock<String>>,
+ }
+ 
++#[derive(Clone, Copy)]
++enum WebsocketSessionCacheMode {
++    Shared,
++    Isolated,
++}
++
+ #[derive(Debug, Clone)]
+ struct LastResponse {
+     response_id: String,
+@@ -364,6 +371,7 @@ fn responses_request_properties_match(
+         stream: previous_stream,
+         stream_options: _,
+         include: previous_include,
++        max_output_tokens: previous_max_output_tokens,
+         service_tier: previous_service_tier,
+         prompt_cache_key: previous_prompt_cache_key,
+         text: previous_text,
+@@ -382,6 +390,7 @@ fn responses_request_properties_match(
+         stream: current_stream,
+         stream_options: _,
+         include: current_include,
++        max_output_tokens: current_max_output_tokens,
+         service_tier: current_service_tier,
+         prompt_cache_key: current_prompt_cache_key,
+         text: current_text,
+@@ -400,6 +409,7 @@ fn responses_request_properties_match(
+         // Stream options control delivery for this response, not the context
+         // referenced by `previous_response_id`.
+         && previous_include == current_include
++        && previous_max_output_tokens == current_max_output_tokens
+         && previous_service_tier == current_service_tier
+         && previous_prompt_cache_key == current_prompt_cache_key
+         && previous_text == current_text
+@@ -559,6 +569,17 @@ impl ModelClient {
+         ModelClientSession {
+             client: self.clone(),
+             websocket_session: self.take_cached_websocket_session(),
++            websocket_session_cache_mode: WebsocketSessionCacheMode::Shared,
++            turn_state: Arc::new(OnceLock::new()),
++        }
++    }
++
++    /// Creates a session whose WebSocket and fallback state never affect real turns.
++    pub(crate) fn new_isolated_session(&self) -> ModelClientSession {
++        ModelClientSession {
++            client: self.clone(),
++            websocket_session: WebsocketSession::default(),
++            websocket_session_cache_mode: WebsocketSessionCacheMode::Isolated,
+             turn_state: Arc::new(OnceLock::new()),
+         }
+     }
+@@ -1023,6 +1044,7 @@ impl ModelClient {
+             stream: true,
+             stream_options,
+             include,
++            max_output_tokens: prompt.max_output_tokens,
+             service_tier,
+             prompt_cache_key,
+             text,
+@@ -1272,6 +1294,12 @@ impl ModelClient {
+ 
+ impl Drop for ModelClientSession {
+     fn drop(&mut self) {
++        if matches!(
++            self.websocket_session_cache_mode,
++            WebsocketSessionCacheMode::Isolated
++        ) {
++            return;
++        }
+         let websocket_session = std::mem::take(&mut self.websocket_session);
+         self.client
+             .store_cached_websocket_session(websocket_session);
+@@ -1283,7 +1311,7 @@ impl ModelClientSession {
+         Arc::clone(&self.turn_state)
+     }
+ 
+-    fn reset_websocket_session(&mut self) {
++    pub(crate) fn reset_websocket_session(&mut self) {
+         self.websocket_session.connection = None;
+         self.websocket_session.endpoint = None;
+         self.websocket_session.last_request = None;
+@@ -2066,7 +2094,7 @@ impl ModelClientSession {
+         }
+     }
+ 
+-    /// Permanently disables WebSockets for this Codex session and resets WebSocket state.
++    /// Disables WebSockets for this client session and resets WebSocket state.
+     ///
+     /// This is used after exhausting the provider retry budget, to force subsequent requests onto
+     /// the HTTP transport.
+@@ -2077,9 +2105,12 @@ impl ModelClientSession {
+         session_telemetry: &SessionTelemetry,
+         model_info: &ModelInfo,
+     ) -> bool {
+-        let activated = self
+-            .client
+-            .force_http_fallback(session_telemetry, model_info);
++        let activated = match self.websocket_session_cache_mode {
++            WebsocketSessionCacheMode::Shared => self
++                .client
++                .force_http_fallback(session_telemetry, model_info),
++            WebsocketSessionCacheMode::Isolated => false,
++        };
+         self.websocket_session = WebsocketSession::default();
+         activated
+     }
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index f2d6be2a232465c988fc9bc5869438119034824a..23c3c68b4c3ee6851316b28a54caa6ec2bc4baa2 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -36,6 +36,9 @@ pub struct Prompt {
+     pub output_schema_strict: bool,
+ 
+     pub(crate) cyber_access_program: Option<codex_protocol::turn_input::CyberAccessProgram>,
++
++    /// Optional cap for generated output tokens.
++    pub max_output_tokens: Option<u64>,
+ }
+ 
+ impl Default for Prompt {
+@@ -48,6 +51,7 @@ impl Default for Prompt {
+             output_schema: None,
+             output_schema_strict: true,
+             cyber_access_program: None,
++            max_output_tokens: None,
+         }
+     }
+ }
+diff --git a/codex-rs/core/src/client_common_tests.rs b/codex-rs/core/src/client_common_tests.rs
+index 1c8625af569ed017316dcfe516267b4e0f7e656e..fb5af714503c8ddb7318d1fba5268adbaa742183 100644
+--- a/codex-rs/core/src/client_common_tests.rs
++++ b/codex-rs/core/src/client_common_tests.rs
+@@ -127,6 +127,7 @@ fn serializes_text_verbosity_when_set() {
+         stream: true,
+         stream_options: None,
+         include: vec![],
++        max_output_tokens: None,
+         prompt_cache_key: None,
+         service_tier: None,
+         text: Some(TextControls {
+@@ -175,6 +176,7 @@ fn serializes_text_schema_with_strict_format() {
+         stream: true,
+         stream_options: None,
+         include: vec![],
++        max_output_tokens: None,
+         prompt_cache_key: None,
+         service_tier: None,
+         text: Some(text_controls),
+@@ -237,6 +239,7 @@ fn omits_text_when_not_set() {
+         stream: true,
+         stream_options: None,
+         include: vec![],
++        max_output_tokens: None,
+         prompt_cache_key: None,
+         service_tier: None,
+         text: None,
+@@ -262,6 +265,7 @@ fn serializes_flex_service_tier_when_set() {
+         stream: true,
+         stream_options: None,
+         include: vec![],
++        max_output_tokens: None,
+         prompt_cache_key: None,
+         service_tier: Some(ServiceTier::Flex.to_string()),
+         text: None,
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 563d73c7ec3fc3e6d5e06218c8fc7ce3cd75c09e..2d54e22e0d9fc91eb7d69fb97a1a4322ec740c41 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -266,6 +266,18 @@ impl CodexThread {
+         self.io.shutdown_and_wait().await
+     }
+ 
++    /// Predicts the next prompt for this loaded thread without advancing it.
++    pub async fn suggest_next_prompt(
++        &self,
++        cancellation_token: CancellationToken,
++    ) -> CodexResult<Option<String>> {
++        Ok(crate::next_prompt_suggestion::suggest_next_prompt(
++            self.session.as_ref(),
++            cancellation_token,
++        )
++        .await)
++    }
++
+     /// Wait until the underlying session loop has terminated.
+     pub async fn wait_until_terminated(&self) {
+         self.io.session_loop_termination.clone().await;
+diff --git a/codex-rs/core/src/compact_remote_request.rs b/codex-rs/core/src/compact_remote_request.rs
+index b6b418c7d0fdf8a54aff28d01767da326276978a..9c64d812a92efc25b1dccbab1bb1bbe25641819e 100644
+--- a/codex-rs/core/src/compact_remote_request.rs
++++ b/codex-rs/core/src/compact_remote_request.rs
+@@ -68,6 +68,7 @@ pub(super) async fn run_remote_compact_attempt(
+         output_schema: None,
+         output_schema_strict: true,
+         cyber_access_program: turn_context.cyber_access_program,
++        max_output_tokens: None,
+     };
+     let responses_metadata = sess
+         .responses_metadata(
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index 1c58c7e4c44d2134c8293babfe8fca4c9a9cfd06..01ebd2e8ee19ce8e9e341d8e537530ffe5de1ace 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -83,6 +83,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
+         output_schema: None,
+         output_schema_strict: true,
+         cyber_access_program: turn_context.cyber_access_program,
++        max_output_tokens: None,
+     };
+ 
+     let responses_metadata = sess
+diff --git a/codex-rs/core/src/context/mod.rs b/codex-rs/core/src/context/mod.rs
+index 58ad8140c863bd218e44f816ce8a3c9ab8f1a7a8..d676c4b89ab1f3fe8c891702f281722b41d73754 100644
+--- a/codex-rs/core/src/context/mod.rs
++++ b/codex-rs/core/src/context/mod.rs
+@@ -28,6 +28,7 @@ mod multi_agent_mode_instructions;
+ mod multi_agent_role_instructions;
+ mod multi_agent_usage_hint;
+ mod network_rule_saved;
++mod next_prompt_suggestion;
+ mod node_repl_review_evidence;
+ mod permissions_instructions;
+ mod personality_spec_instructions;
+@@ -87,6 +88,7 @@ pub(crate) use multi_agent_mode_instructions::MultiAgentModeInstructions;
+ pub(crate) use multi_agent_role_instructions::MultiAgentRoleInstructions;
+ pub(crate) use multi_agent_usage_hint::MultiAgentUsageHint;
+ pub(crate) use network_rule_saved::NetworkRuleSaved;
++pub(crate) use next_prompt_suggestion::NextPromptSuggestionInstructions;
+ pub use node_repl_review_evidence::NodeReplReviewEvidence;
+ pub use node_repl_review_evidence::NodeReplReviewEvidenceMode;
+ pub(crate) use node_repl_review_evidence::node_repl_review_evidence_mode;
+diff --git a/codex-rs/core/src/context/next_prompt_suggestion.rs b/codex-rs/core/src/context/next_prompt_suggestion.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..31d0fcaa37685af4ce6b910debddd9d0c916d317
+--- /dev/null
++++ b/codex-rs/core/src/context/next_prompt_suggestion.rs
+@@ -0,0 +1,43 @@
++use super::ContextualUserFragment;
++use codex_protocol::models::ContentItemKind;
++
++const NEXT_PROMPT_SUGGESTION_PROMPT: &str = r#"[NEXT INPUT PREDICTION]
++
++Predict one short input that the user is likely to type next into Codex.
++
++Base the prediction only on the visible conversation. Continue the user's stated intent,
++language, and writing style. Prefer a concrete continuation that is already implied by the
++conversation. Return no text when several next actions are equally plausible, when the user
++needs to review an error, or when the task has no clear continuation.
++
++Do not speak as Codex, evaluate the result, introduce a new goal, ask a question, or combine
++multiple actions. Do not predict input involving credentials, private data, harmful actions,
++or security-sensitive operations.
++
++Output one line of 2 to 12 words with no quotes, label, punctuation, or explanation. An empty
++response is valid."#;
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) struct NextPromptSuggestionInstructions;
++
++impl ContextualUserFragment for NextPromptSuggestionInstructions {
++    fn content_kind(&self) -> ContentItemKind {
++        ContentItemKind("next_prompt.suggestion_instructions".to_string())
++    }
++
++    fn role(&self) -> &'static str {
++        "user"
++    }
++
++    fn markers(&self) -> (&'static str, &'static str) {
++        Self::type_markers()
++    }
++
++    fn type_markers() -> (&'static str, &'static str) {
++        ("<next_prompt_suggestion>", "</next_prompt_suggestion>")
++    }
++
++    fn body(&self) -> String {
++        format!("\n{NEXT_PROMPT_SUGGESTION_PROMPT}\n")
++    }
++}
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 8463ae9e16e997cebd910419f7cf8052b6b97f84..b9f41588fff739318870ba99cf080ed18c57b945 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -76,6 +76,7 @@ mod mcp_skill_dependencies;
+ mod mcp_tool_approval_templates;
+ mod mcp_tool_exposure;
+ mod network_policy_decision;
++mod next_prompt_suggestion;
+ pub use mcp::McpManager;
+ mod original_image_detail;
+ pub use codex_mcp::CodexAppsToolsCache;
+diff --git a/codex-rs/core/src/next_prompt_suggestion.rs b/codex-rs/core/src/next_prompt_suggestion.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9382f3fb71d8d10051a943dc3d3aa35b43324c79
+--- /dev/null
++++ b/codex-rs/core/src/next_prompt_suggestion.rs
+@@ -0,0 +1,263 @@
++//! Samples a hidden next-prompt prediction from an already-loaded session.
++//!
++//! The sample reuses a bounded tail of prompt-visible history, adds one synthetic
++//! user instruction, and never mutates the real conversation. Callers should
++//! treat `None` as the normal result whenever the conversation is not at a safe,
++//! stable boundary or the model elects to stay silent.
++
++use crate::TurnContext;
++use crate::client_common::Prompt;
++use crate::client_common::ResponseEvent;
++use crate::context::ContextualUserFragment;
++use crate::context::NextPromptSuggestionInstructions;
++use crate::responses_metadata::CodexResponsesRequestKind;
++use crate::session::session::Session;
++use codex_async_utils::OrCancelExt;
++use codex_protocol::openai_models::ModelPreset;
++use codex_protocol::openai_models::ReasoningEffort;
++use futures::StreamExt;
++use std::time::Duration;
++use std::time::Instant;
++use tokio_util::sync::CancellationToken;
++
++#[path = "next_prompt_suggestion_history.rs"]
++mod history;
++use history::HistorySnapshot;
++use history::assistant_output_text;
++use history::bounded_recent_prompt_history;
++use history::has_unpaired_tool_flow;
++use history::session_history_matches_snapshot;
++use history::session_is_idle_for_suggestion;
++use history::suggestion_prompt_fits_context_window;
++
++#[cfg(test)]
++#[path = "next_prompt_suggestion_tests.rs"]
++mod tests;
++
++const NEXT_PROMPT_SUGGESTION_MAX_HISTORY_TOKENS: usize = 4_096;
++const NEXT_PROMPT_SUGGESTION_MAX_OUTPUT_TOKENS: u64 = 32;
++const NEXT_PROMPT_SUGGESTION_SAMPLE_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 8);
++
++pub(crate) async fn suggest_next_prompt(
++    sess: &Session,
++    cancellation_token: CancellationToken,
++) -> Option<String> {
++    if cancellation_token.is_cancelled() || !session_is_idle_for_suggestion(sess).await {
++        return None;
++    }
++
++    let started_at = Instant::now();
++    let turn_context = sess.new_lightweight_turn().await;
++    let suggestion_reasoning_effort = fast_suggestion_reasoning_effort(&turn_context);
++
++    let history = sess.clone_history().await;
++    let history_snapshot = HistorySnapshot::from_history(&history);
++    if has_unpaired_tool_flow(history.raw_items()) {
++        tracing::debug!("next prompt suggestion skipped for incomplete tool flow");
++        return None;
++    }
++    let prompt_input = history.for_prompt(&turn_context.model_info().input_modalities);
++    let Some(mut prompt_input) =
++        bounded_recent_prompt_history(prompt_input, NEXT_PROMPT_SUGGESTION_MAX_HISTORY_TOKENS)
++    else {
++        tracing::debug!("next prompt suggestion skipped without stable recent history");
++        return None;
++    };
++    prompt_input.push(ContextualUserFragment::into(
++        NextPromptSuggestionInstructions,
++    ));
++
++    let prompt = Prompt {
++        input: prompt_input,
++        tools: Default::default(),
++        parallel_tool_calls: false,
++        base_instructions: sess.get_base_instructions().await,
++        output_schema: None,
++        output_schema_strict: true,
++        cyber_access_program: turn_context.cyber_access_program.clone(),
++        max_output_tokens: Some(NEXT_PROMPT_SUGGESTION_MAX_OUTPUT_TOKENS),
++    };
++    if !suggestion_prompt_fits_context_window(&prompt, &turn_context)
++        || !session_is_idle_for_suggestion(sess).await
++    {
++        return None;
++    }
++
++    let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
++        sess.installation_id.clone(),
++        sess.current_window_id().await,
++        CodexResponsesRequestKind::Turn,
++    );
++    let mut client_session = sess.services.model_client.new_isolated_session();
++    let inference_trace = codex_rollout_trace::InferenceTraceContext::disabled();
++    let sample_deadline = tokio::time::sleep(NEXT_PROMPT_SUGGESTION_SAMPLE_TIMEOUT);
++    tokio::pin!(sample_deadline);
++    let stream = client_session
++        .stream(
++            &prompt,
++            turn_context.model_info(),
++            &turn_context.session_telemetry,
++            suggestion_reasoning_effort.clone(),
++            turn_context.reasoning_summary(),
++            turn_context.config.service_tier.clone(),
++            &responses_metadata,
++            &inference_trace,
++        )
++        .or_cancel(&cancellation_token);
++    let mut stream = match tokio::select! {
++        result = stream => result,
++        _ = &mut sample_deadline => {
++            tracing::debug!("next prompt suggestion timed out before sampling started");
++            return None;
++        }
++    } {
++        Ok(Ok(stream)) => stream,
++        Ok(Err(err)) => {
++            tracing::debug!(error = ?err, "next prompt suggestion failed before sampling started");
++            return None;
++        }
++        Err(codex_async_utils::CancelErr::Cancelled) => return None,
++    };
++
++    let mut streamed_text = String::new();
++    let mut completed_text = None;
++    loop {
++        if !session_is_idle_for_suggestion(sess).await {
++            client_session.reset_websocket_session();
++            return None;
++        }
++        let Some(event) = (tokio::select! {
++            event = stream.next().or_cancel(&cancellation_token) => match event {
++                Ok(event) => event,
++                Err(codex_async_utils::CancelErr::Cancelled) => {
++                    client_session.reset_websocket_session();
++                    return None;
++                }
++            },
++            _ = tokio::time::sleep(Duration::from_millis(/*millis*/ 100)) => continue,
++            _ = &mut sample_deadline => {
++                tracing::debug!("next prompt suggestion timed out while sampling");
++                client_session.reset_websocket_session();
++                return None;
++            },
++        }) else {
++            client_session.reset_websocket_session();
++            return None;
++        };
++        match event {
++            Ok(ResponseEvent::OutputItemDone(item)) => {
++                if let Some(text) = assistant_output_text(&item) {
++                    completed_text = Some(text);
++                }
++            }
++            Ok(ResponseEvent::OutputTextDelta(delta)) => streamed_text.push_str(&delta),
++            Ok(ResponseEvent::RateLimits(snapshot)) => {
++                sess.record_rate_limits_info(snapshot).await;
++            }
++            Ok(ResponseEvent::Completed { .. }) => break,
++            Ok(_) => {}
++            Err(err) => {
++                tracing::debug!(error = ?err, "next prompt suggestion stream failed");
++                client_session.reset_websocket_session();
++                return None;
++            }
++        }
++    }
++    client_session.reset_websocket_session();
++    if cancellation_token.is_cancelled()
++        || !session_history_matches_snapshot(sess, history_snapshot).await
++        || !session_is_idle_for_suggestion(sess).await
++    {
++        return None;
++    }
++
++    let suggestion =
++        filter_next_prompt_suggestion(completed_text.as_deref().unwrap_or(streamed_text.as_str()));
++    tracing::debug!(
++        latency_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
++        model = %turn_context.model_info().slug,
++        effort = ?suggestion_reasoning_effort,
++        has_suggestion = suggestion.is_some(),
++        "next prompt suggestion sampled"
++    );
++    suggestion
++}
++
++fn fast_suggestion_reasoning_effort(turn_context: &TurnContext) -> Option<ReasoningEffort> {
++    let fallback = turn_context.reasoning_effort().cloned();
++    let Some(preset) = turn_context
++        .available_models
++        .iter()
++        .find(|preset| preset.model == turn_context.model_info().slug)
++    else {
++        return fallback;
++    };
++    preferred_suggestion_effort(preset, fallback)
++}
++
++fn preferred_suggestion_effort(
++    preset: &ModelPreset,
++    fallback: Option<ReasoningEffort>,
++) -> Option<ReasoningEffort> {
++    for effort in [ReasoningEffort::Minimal, ReasoningEffort::Low] {
++        if preset
++            .supported_reasoning_efforts
++            .iter()
++            .any(|supported| supported.effort == effort)
++        {
++            return Some(effort);
++        }
++    }
++    fallback
++}
++
++fn filter_next_prompt_suggestion(raw: &str) -> Option<String> {
++    let raw = raw.trim();
++    let suggestion = raw.split_whitespace().collect::<Vec<_>>().join(" ");
++    if suggestion.is_empty()
++        || raw.chars().any(|ch| matches!(ch, '\n' | '\r' | '\t'))
++        || suggestion.len() >= 100
++        || suggestion.chars().any(|ch| matches!(ch, '?' | '!'))
++        || suggestion.ends_with('.')
++        || suggestion.chars().any(|ch| matches!(ch, '`' | '*'))
++        || suggestion.starts_with("- ")
++    {
++        return None;
++    }
++
++    let lower = suggestion.to_ascii_lowercase();
++    if matches!(
++        lower.as_str(),
++        "done" | "no suggestion" | "stay silent" | "silence"
++    ) || lower.starts_with("suggestion:")
++        || lower.starts_with("next prompt:")
++        || is_wrapped_meta(&suggestion)
++        || is_wrapped_quote(&suggestion)
++        || starts_with_any(&lower, &["looks good", "thanks", "thank you"])
++        || starts_with_any(&lower, &["let me", "i'll", "i will", "here's"])
++    {
++        return None;
++    }
++
++    let word_count = suggestion.split_whitespace().count();
++    if word_count > 12
++        || (word_count < 2 && !matches!(lower.as_str(), "yes" | "commit" | "push" | "continue"))
++    {
++        return None;
++    }
++    Some(suggestion)
++}
++
++fn is_wrapped_meta(suggestion: &str) -> bool {
++    (suggestion.starts_with('(') && suggestion.ends_with(')'))
++        || (suggestion.starts_with('[') && suggestion.ends_with(']'))
++}
++
++fn is_wrapped_quote(suggestion: &str) -> bool {
++    (suggestion.starts_with('"') && suggestion.ends_with('"'))
++        || (suggestion.starts_with('\'') && suggestion.ends_with('\''))
++}
++
++fn starts_with_any(value: &str, prefixes: &[&str]) -> bool {
++    prefixes.iter().any(|prefix| value.starts_with(prefix))
++}
+diff --git a/codex-rs/core/src/next_prompt_suggestion_history.rs b/codex-rs/core/src/next_prompt_suggestion_history.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0644d81968fa2441512c67fb93a43221d867b5cf
+--- /dev/null
++++ b/codex-rs/core/src/next_prompt_suggestion_history.rs
+@@ -0,0 +1,181 @@
++use crate::TurnContext;
++use crate::client_common::Prompt;
++use crate::context_manager::ContextManager;
++use crate::session::session::Session;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::MessagePhase;
++use codex_protocol::models::ResponseItem;
++use codex_utils_output_truncation::approx_token_count;
++use std::collections::HashSet;
++
++const NEXT_PROMPT_SUGGESTION_TOKEN_HEADROOM: i64 = 1_024;
++
++#[derive(Clone, Copy)]
++pub(super) struct HistorySnapshot {
++    version: u64,
++    len: usize,
++}
++
++impl HistorySnapshot {
++    pub(super) fn from_history(history: &ContextManager) -> Self {
++        Self {
++            version: history.history_version(),
++            len: history.raw_items().len(),
++        }
++    }
++}
++
++pub(super) async fn session_is_idle_for_suggestion(sess: &Session) -> bool {
++    sess.active_turn.lock().await.is_none() && sess.conversation.running_state().await.is_none()
++}
++
++pub(super) async fn session_history_matches_snapshot(
++    sess: &Session,
++    snapshot: HistorySnapshot,
++) -> bool {
++    let history = sess.clone_history().await;
++    history.history_version() == snapshot.version && history.raw_items().len() == snapshot.len
++}
++
++pub(super) fn suggestion_prompt_fits_context_window(
++    prompt: &Prompt,
++    turn_context: &TurnContext,
++) -> bool {
++    let Some(model_context_window) = turn_context.model_context_window() else {
++        return false;
++    };
++    let Ok(input) = serde_json::to_string(&prompt.input) else {
++        return false;
++    };
++    let estimated_token_count = approx_token_count(&prompt.base_instructions.text)
++        .saturating_add(approx_token_count(&input));
++    let estimated_token_count = i64::try_from(estimated_token_count).unwrap_or(i64::MAX);
++    estimated_token_count
++        < model_context_window.saturating_sub(NEXT_PROMPT_SUGGESTION_TOKEN_HEADROOM)
++}
++
++pub(super) fn bounded_recent_prompt_history(
++    items: Vec<ResponseItem>,
++    max_tokens: usize,
++) -> Option<Vec<ResponseItem>> {
++    let items = items
++        .into_iter()
++        .filter(|item| !matches!(item, ResponseItem::Reasoning { .. }))
++        .collect::<Vec<_>>();
++    let mut remaining_tokens = max_tokens;
++    let mut keep_from = items.len();
++    for (index, item) in items.iter().enumerate().rev() {
++        let serialized = serde_json::to_string(item).ok()?;
++        let item_tokens = approx_token_count(&serialized);
++        if item_tokens > remaining_tokens {
++            break;
++        }
++        keep_from = index;
++        remaining_tokens = remaining_tokens.saturating_sub(item_tokens);
++    }
++    let bounded = items[keep_from..].to_vec();
++    if bounded.is_empty()
++        || has_unpaired_tool_flow(&bounded)
++        || !history_ends_at_assistant_response(&bounded)
++        || final_assistant_message_count(&bounded) < 1
++    {
++        return None;
++    }
++    Some(bounded)
++}
++
++fn history_ends_at_assistant_response(items: &[ResponseItem]) -> bool {
++    matches!(
++        items.last(),
++        Some(ResponseItem::Message { role, phase, .. })
++            if role == "assistant" && !matches!(phase, Some(MessagePhase::Commentary))
++    )
++}
++
++fn final_assistant_message_count(items: &[ResponseItem]) -> usize {
++    items
++        .iter()
++        .filter(|item| {
++            matches!(
++                item,
++                ResponseItem::Message { role, phase, .. }
++                    if role == "assistant" && !matches!(phase, Some(MessagePhase::Commentary))
++            )
++        })
++        .count()
++}
++
++pub(super) fn assistant_output_text(item: &ResponseItem) -> Option<String> {
++    let ResponseItem::Message { role, content, .. } = item else {
++        return None;
++    };
++    if role != "assistant" {
++        return None;
++    }
++    let text = content
++        .iter()
++        .filter_map(|content| match content {
++            ContentItem::OutputText { text } => Some(text.as_str()),
++            _ => None,
++        })
++        .collect::<String>();
++    (!text.is_empty()).then_some(text)
++}
++
++pub(super) fn has_unpaired_tool_flow<'a>(
++    items: impl IntoIterator<Item = &'a ResponseItem>,
++) -> bool {
++    let mut function_calls = HashSet::new();
++    let mut function_outputs = HashSet::new();
++    let mut custom_tool_calls = HashSet::new();
++    let mut custom_tool_outputs = HashSet::new();
++    let mut tool_search_calls = HashSet::new();
++    let mut tool_search_outputs = HashSet::new();
++    let mut client_tool_search_outputs = HashSet::new();
++
++    for item in items {
++        match item {
++            ResponseItem::FunctionCall { call_id, .. }
++            | ResponseItem::LocalShellCall {
++                call_id: Some(call_id),
++                ..
++            } => {
++                function_calls.insert(call_id.clone());
++            }
++            ResponseItem::FunctionCallOutput {
++                call_id: Some(call_id),
++                ..
++            } => {
++                function_outputs.insert(call_id.clone());
++            }
++            ResponseItem::CustomToolCall { call_id, .. } => {
++                custom_tool_calls.insert(call_id.clone());
++            }
++            ResponseItem::CustomToolCallOutput { call_id, .. } => {
++                custom_tool_outputs.insert(call_id.clone());
++            }
++            ResponseItem::ToolSearchCall {
++                call_id: Some(call_id),
++                ..
++            } => {
++                tool_search_calls.insert(call_id.clone());
++            }
++            ResponseItem::ToolSearchOutput {
++                call_id: Some(call_id),
++                execution,
++                ..
++            } => {
++                tool_search_outputs.insert(call_id.clone());
++                if execution != "server" {
++                    client_tool_search_outputs.insert(call_id.clone());
++                }
++            }
++            _ => {}
++        }
++    }
++
++    function_calls != function_outputs
++        || custom_tool_calls != custom_tool_outputs
++        || !tool_search_calls.is_subset(&tool_search_outputs)
++        || !client_tool_search_outputs.is_subset(&tool_search_calls)
++}
+diff --git a/codex-rs/core/src/next_prompt_suggestion_tests.rs b/codex-rs/core/src/next_prompt_suggestion_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6e47cd31694ce36d3e62afdf157d618a9c9bd09f
+--- /dev/null
++++ b/codex-rs/core/src/next_prompt_suggestion_tests.rs
+@@ -0,0 +1,126 @@
++use super::bounded_recent_prompt_history;
++use super::filter_next_prompt_suggestion;
++use super::has_unpaired_tool_flow;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::FunctionCallOutputPayload;
++use codex_protocol::models::ReasoningItemContent;
++use codex_protocol::models::ReasoningItemReasoningSummary;
++use codex_protocol::models::ResponseItem;
++use pretty_assertions::assert_eq;
++
++fn message(role: &str, text: &str) -> ResponseItem {
++    ResponseItem::Message {
++        id: None,
++        role: role.to_string(),
++        content: vec![if role == "assistant" {
++            ContentItem::OutputText {
++                text: text.to_string(),
++            }
++        } else {
++            ContentItem::InputText {
++                text: text.to_string(),
++            }
++        }],
++        phase: None,
++        internal_chat_message_metadata_passthrough: None,
++    }
++}
++
++#[test]
++fn filter_keeps_composer_safe_prompts() {
++    for (suggestion, expected) in [
++        ("run the tests", "run the tests"),
++        (" run the tests\n", "run the tests"),
++        ("commit", "commit"),
++        ("продолжай реализацию", "продолжай реализацию"),
++    ] {
++        assert_eq!(
++            filter_next_prompt_suggestion(suggestion),
++            Some(expected.to_string())
++        );
++    }
++}
++
++#[test]
++fn filter_rejects_non_prompt_outputs() {
++    for suggestion in [
++        "",
++        "done",
++        "Suggestion: run the tests",
++        "looks good",
++        "thanks",
++        "let me run tests",
++        "what about tests?",
++        "run tests.",
++        "\"run the tests\"",
++        "run\ntests",
++        "continue with every possible next step in this project and explain every detail now",
++    ] {
++        assert_eq!(filter_next_prompt_suggestion(suggestion), None);
++    }
++}
++
++#[test]
++fn bounded_history_accepts_one_completed_assistant_message() {
++    // Given one fully completed user/assistant turn.
++    let completed_turn = vec![message("user", "task"), message("assistant", "answer")];
++
++    // When the history is bounded for a next-prompt suggestion.
++    let bounded = bounded_recent_prompt_history(completed_turn.clone(), /*max_tokens*/ 256);
++
++    // Then that first completed turn is enough context for sampling.
++    assert_eq!(bounded, Some(completed_turn));
++}
++
++#[test]
++fn bounded_history_ignores_hidden_reasoning_when_preserving_completed_turns() {
++    let visible_history = vec![
++        message("user", "first task"),
++        message("assistant", "first answer"),
++        message("user", "second task"),
++        message("assistant", "second answer"),
++    ];
++    let mut history_with_reasoning = visible_history.clone();
++    history_with_reasoning.insert(
++        2,
++        ResponseItem::Reasoning {
++            id: None,
++            summary: vec![ReasoningItemReasoningSummary::SummaryText {
++                text: "summary".to_string(),
++            }],
++            content: Some(vec![ReasoningItemContent::ReasoningText {
++                text: "hidden reasoning ".repeat(5_000),
++            }]),
++            encrypted_content: None,
++            internal_chat_message_metadata_passthrough: None,
++        },
++    );
++
++    assert_eq!(
++        bounded_recent_prompt_history(history_with_reasoning, /*max_tokens*/ 256),
++        Some(visible_history)
++    );
++}
++
++#[test]
++fn incomplete_tool_flow_is_suppressed() {
++    let call = ResponseItem::CustomToolCall {
++        id: None,
++        status: None,
++        call_id: "call-1".to_string(),
++        name: "exec".to_string(),
++        namespace: None,
++        input: "{}".to_string(),
++        internal_chat_message_metadata_passthrough: None,
++    };
++    assert!(has_unpaired_tool_flow([&call]));
++
++    let output = ResponseItem::CustomToolCallOutput {
++        id: None,
++        call_id: "call-1".to_string(),
++        name: Some("exec".to_string()),
++        output: FunctionCallOutputPayload::from_text("done".to_string()),
++        internal_chat_message_metadata_passthrough: None,
++    };
++    assert!(!has_unpaired_tool_flow([&call, &output]));
++}
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 9ab25ca1519db9b51e27d2d508b3ed6c0c847afa..fbf01cd3a6453d7ba4c03e62074ca3c5bc6d8fc7 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1346,6 +1346,7 @@ pub(crate) fn build_prompt(
+             &turn_context.session_source,
+         ),
+         cyber_access_program: turn_context.cyber_access_program,
++        max_output_tokens: None,
+     }
+ }
+ 
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index cc3681d42098956c61866dfa24e1d43f5b5768e1..2a456ac2f618197f82ad7a3a2db65273ece541a9 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -1084,6 +1084,75 @@ impl Session {
+         .await
+     }
+ 
++    /// Builds an ephemeral turn context without turn-start side effects.
++    ///
++    /// Hidden read-only work such as next-prompt prediction needs the current
++    /// model/provider/environment settings, but must not load plugins or skills,
++    /// enrich Git context, or mutate stored per-turn extension state.
++    pub(crate) async fn new_lightweight_turn(&self) -> Arc<TurnContext> {
++        let session_configuration = self.default_turn_configuration().await;
++        let turn_environments = self.services.turn_environments.snapshot().await;
++        let primary_turn_environment = turn_environments.primary();
++        let cwd = primary_turn_environment
++            .as_ref()
++            .and_then(|turn_environment| turn_environment.cwd().to_abs_path().ok())
++            .unwrap_or_else(|| session_configuration.cwd().clone());
++        let per_turn_config = self.build_per_turn_config(&session_configuration, cwd.clone());
++        let network_permission_profile = primary_turn_environment
++            .map(TurnEnvironment::permission_profile)
++            .cloned()
++            .unwrap_or_else(|| session_configuration.permission_profile());
++        let model_info = session_configuration
++            .step_settings
++            .resolve_model_info(
++                self.services.models_manager.as_ref(),
++                &session_configuration.model_info_overrides,
++                self.features.enabled(Feature::Personality),
++            )
++            .await;
++        let multi_agent_version = per_turn_config.multi_agent_version_for_model(
++            self.multi_agent_version()
++                .or(model_info.multi_agent_version),
++        );
++        let step_settings = Arc::new(ResolvedStepSettings::new(
++            Arc::clone(&session_configuration.step_settings),
++            Arc::new(model_info),
++            self.features.enabled(Feature::FastMode),
++        ));
++        let mut turn_context = Self::make_turn_context(
++            self.thread_id(),
++            self.session_id(),
++            Some(Arc::clone(&self.services.auth_manager)),
++            &self.services.session_telemetry,
++            session_configuration.provider.clone(),
++            &session_configuration,
++            multi_agent_version,
++            self.services.user_shell.as_ref(),
++            self.services.shell_zsh_path.as_ref(),
++            self.services.main_execve_wrapper_exe.as_ref(),
++            per_turn_config,
++            step_settings,
++            &self.services.models_manager,
++            self.services
++                .network_proxy
++                .load_full()
++                .as_ref()
++                .and_then(|started_proxy| {
++                    Self::managed_network_proxy_active_for_permission_profile(
++                        &network_permission_profile,
++                    )
++                    .then(|| started_proxy.proxy())
++                }),
++            turn_environments,
++            cwd,
++            self.next_internal_sub_id(),
++            HostSkillsSnapshot::new(Arc::new(SkillLoadOutcome::default())),
++        );
++        turn_context.code_mode_available = self.services.code_mode_service.is_available();
++        turn_context.realtime_active = self.conversation.running_state().await.is_some();
++        Arc::new(turn_context)
++    }
++
+     pub(crate) async fn new_turn_with_default_settings(
+         &self,
+         sub_id: String,
+diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
+index 5fc867a5cbc08136f777d7c5e6edd3c000e8e75e..616d7f11d0221a366c92abb58e337002b99a8534 100644
+--- a/codex-rs/core/tests/suite/mod.rs
++++ b/codex-rs/core/tests/suite/mod.rs
+@@ -113,6 +113,7 @@ mod multi_agent_resume;
+ #[cfg(unix)]
+ mod multi_exec_server_sandbox;
+ mod network_approval;
++mod next_prompt_suggestion;
+ mod openai_file_mcp;
+ mod otel;
+ mod override_updates;
+diff --git a/codex-rs/core/tests/suite/next_prompt_suggestion.rs b/codex-rs/core/tests/suite/next_prompt_suggestion.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2dfea54a9d6bc9bd9db02bfd03eb1c0cbea5fc7e
+--- /dev/null
++++ b/codex-rs/core/tests/suite/next_prompt_suggestion.rs
+@@ -0,0 +1,90 @@
++use anyhow::Result;
++use core_test_support::responses::ev_assistant_message;
++use core_test_support::responses::ev_completed;
++use core_test_support::responses::ev_response_created;
++use core_test_support::responses::mount_sse_sequence;
++use core_test_support::responses::sse;
++use core_test_support::test_codex::test_codex;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++use tokio_util::sync::CancellationToken;
++use wiremock::MockServer;
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn suggest_next_prompt_samples_bounded_history_without_tools() -> Result<()> {
++    let server = MockServer::start().await;
++    let responses = mount_sse_sequence(
++        &server,
++        vec![
++            sse(vec![
++                ev_response_created("resp-1"),
++                ev_assistant_message("msg-1", "first turn complete"),
++                ev_completed("resp-1"),
++            ]),
++            sse(vec![
++                ev_response_created("resp-2"),
++                ev_assistant_message("msg-2", "second turn complete"),
++                ev_completed("resp-2"),
++            ]),
++            sse(vec![
++                ev_response_created("resp-suggestion"),
++                ev_assistant_message("msg-suggestion", "run the tests"),
++                ev_completed("resp-suggestion"),
++            ]),
++        ],
++    )
++    .await;
++
++    let mut builder = test_codex();
++    let test = builder.build_with_auto_env(&server).await?;
++    test.submit_turn("first task").await?;
++    test.submit_turn("second task").await?;
++
++    let suggestion = test
++        .codex
++        .suggest_next_prompt(CancellationToken::new())
++        .await?;
++    assert_eq!(suggestion, Some("run the tests".to_string()));
++
++    let requests = responses.requests();
++    assert_eq!(requests.len(), 3);
++    let suggestion_request = &requests[2];
++    let suggestion_body = suggestion_request.body_json();
++    assert_eq!(suggestion_body["tools"], json!([]));
++    assert_eq!(suggestion_body["parallel_tool_calls"], false);
++    assert_eq!(suggestion_body["max_output_tokens"], json!(32));
++    assert!(
++        suggestion_request
++            .message_input_texts("user")
++            .last()
++            .is_some_and(|text| text.contains("<next_prompt_suggestion>"))
++    );
++
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn suggest_next_prompt_skips_early_history_without_request() -> Result<()> {
++    let server = MockServer::start().await;
++    let responses = mount_sse_sequence(
++        &server,
++        vec![sse(vec![
++            ev_response_created("resp-1"),
++            ev_assistant_message("msg-1", "first turn complete"),
++            ev_completed("resp-1"),
++        ])],
++    )
++    .await;
++    let mut builder = test_codex();
++    let test = builder.build_with_auto_env(&server).await?;
++    test.submit_turn("first task").await?;
++
++    let suggestion = test
++        .codex
++        .suggest_next_prompt(CancellationToken::new())
++        .await?;
++    assert_eq!(suggestion, None);
++    assert_eq!(responses.requests().len(), 1);
++
++    Ok(())
++}
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+index f7f5aa411b75de8963d2ef3fa08235297a235b12..432b4041d33ee8dfb764dbd7195107b5ca07a169 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+@@ -535,7 +535,8 @@ impl LunaSampler {
+             stream: true,
+             stream_options: None,
+             include: Vec::new(),
+-            service_tier: None,
++            max_output_tokens: None,
++            service_tier: self.config.service_tier.clone(),
+             prompt_cache_key: Some(format!("guardian-v2:{}", self.config.thread_id)),
+             text: None,
+             client_metadata: None,
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index f064fd018ec14cc4b00bc8e766427b34983751fc..f2d0301e57aa0f25fc7d06fb16ce86eb07838331 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -222,6 +222,7 @@ mod history_pagination;
+ mod history_ui;
+ mod input;
+ mod loaded_threads;
++mod next_prompt_suggestion;
+ mod pending_interactive_replay;
+ mod permission_shortcuts;
+ mod pets;
+@@ -623,6 +624,10 @@ pub(crate) struct App {
+         tokio::sync::broadcast::Sender<codex_app_server_protocol::ThreadStatusChangedNotification>,
+     dynamic_tool_tasks: HashMap<codex_app_server_protocol::RequestId, (String, JoinHandle<()>)>,
+     pending_startup_thread_start: bool,
++    /// Monotonic token used to ignore results from older composer state.
++    next_prompt_suggestion_generation: u64,
++    /// Current fire-and-forget suggestion request, if one is still in flight.
++    pending_next_prompt_suggestion: Option<PendingNextPromptSuggestion>,
+     /// Keeps protected screens quarantined until initialized chat receives genuine user input.
+     startup_protected_input_boundary: bool,
+     /// Keeps that boundary armed while a startup approval waits for the typing-idle timer.
+@@ -640,6 +645,17 @@ pub(crate) struct App {
+     recap: recap::RecapState,
+ }
+ 
++struct PendingNextPromptSuggestion {
++    task: JoinHandle<()>,
++    cancel_request: NextPromptSuggestionCancelRequest,
++}
++
++struct NextPromptSuggestionCancelRequest {
++    request_handle: AppServerRequestHandle,
++    thread_id: ThreadId,
++    cancellation_token: String,
++}
++
+ #[derive(Debug, Clone, PartialEq)]
+ struct RuntimePermissionProfileOverride {
+     permission_profile: PermissionProfile,
+@@ -833,6 +849,7 @@ impl App {
+                     self.handle_key_event(tui, app_server, key_event).await;
+                 }
+                 TuiEvent::Paste(pasted) => {
++                    self.clear_next_prompt_suggestion();
+                     // Pasted text may contain CRLF pairs or bare CRs (e.g., from iTerm2),
+                     // but tui-textarea expects LF. Normalize CRLF pairs before bare CRs so
+                     // each pasted line break becomes one LF and existing LFs stay unchanged.
+@@ -956,6 +973,7 @@ impl App {
+ 
+ impl Drop for App {
+     fn drop(&mut self) {
++        self.cancel_pending_next_prompt_suggestion();
+         if let Err(err) = self.chat_widget.clear_managed_terminal_title() {
+             tracing::debug!(error = %err, "failed to clear terminal title on app drop");
+         }
+diff --git a/codex-rs/tui/src/app/background_requests.rs b/codex-rs/tui/src/app/background_requests.rs
+index c39f5c6375d4965a9819ce0acc99f2e1d137545d..e998640721f00f36ecb578aa4f51e8b89e085113 100644
+--- a/codex-rs/tui/src/app/background_requests.rs
++++ b/codex-rs/tui/src/app/background_requests.rs
+@@ -23,6 +23,8 @@ use codex_app_server_protocol::MarketplaceRemoveResponse;
+ use codex_app_server_protocol::MarketplaceUpgradeParams;
+ use codex_app_server_protocol::MarketplaceUpgradeResponse;
+ use codex_app_server_protocol::RequestId;
++use codex_app_server_protocol::ThreadSuggestNextPromptParams;
++use codex_app_server_protocol::ThreadSuggestNextPromptResponse;
+ 
+ use crate::hooks_rpc::fetch_hooks_list;
+ use crate::hooks_rpc::write_hook_trust;
+@@ -38,6 +40,46 @@ const RATE_LIMIT_RESET_REQUEST_TIMEOUT: std::time::Duration =
+ const WORKSPACE_HEADLINE_FETCH_TIMEOUT: std::time::Duration =
+     std::time::Duration::from_millis(/*millis*/ 2000);
+ 
++pub(super) async fn fetch_next_prompt_suggestion(
++    request_handle: AppServerRequestHandle,
++    thread_id: ThreadId,
++    cancellation_token: String,
++) -> Result<Option<String>> {
++    let request_id = RequestId::String(format!("next-prompt-suggestion-{}", Uuid::new_v4()));
++    let response: ThreadSuggestNextPromptResponse = request_handle
++        .request_typed(ClientRequest::ThreadSuggestNextPrompt {
++            request_id,
++            params: ThreadSuggestNextPromptParams {
++                thread_id: thread_id.to_string(),
++                cancellation_token: Some(cancellation_token),
++                cancel: false,
++            },
++        })
++        .await
++        .wrap_err("thread/suggestNextPrompt failed in TUI")?;
++    Ok(response.suggestion)
++}
++
++pub(super) async fn cancel_next_prompt_suggestion(
++    request_handle: AppServerRequestHandle,
++    thread_id: ThreadId,
++    cancellation_token: String,
++) -> Result<()> {
++    let request_id = RequestId::String(format!("next-prompt-suggestion-cancel-{}", Uuid::new_v4()));
++    let _response: ThreadSuggestNextPromptResponse = request_handle
++        .request_typed(ClientRequest::ThreadSuggestNextPrompt {
++            request_id,
++            params: ThreadSuggestNextPromptParams {
++                thread_id: thread_id.to_string(),
++                cancellation_token: Some(cancellation_token),
++                cancel: true,
++            },
++        })
++        .await
++        .wrap_err("thread/suggestNextPrompt cancellation failed in TUI")?;
++    Ok(())
++}
++
+ impl App {
+     pub(super) fn fetch_mcp_inventory(
+         &mut self,
+diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
+index 055612ef0ba2ef40dd4a6a77fc092666206c4cb3..92dd523cf584d4f9e089e08e7962fb5eb80ecac2 100644
+--- a/codex-rs/tui/src/app/event_dispatch.rs
++++ b/codex-rs/tui/src/app/event_dispatch.rs
+@@ -721,7 +721,11 @@ impl App {
+                     self.render_chat_widget_frame(tui, screen_size)?;
+                 }
+                 self.chat_widget.prepare_local_op_submission(&op);
+-                if let Err(err) = self.submit_active_thread_op(app_server, op).await {
++                let submission = self.submit_active_thread_op(app_server, op).await;
++                if is_user_turn && submission.is_ok() {
++                    self.clear_next_prompt_suggestion();
++                }
++                if let Err(err) = submission {
+                     let unsupported_permissions = err
+                         .downcast_ref::<UnsupportedLegacyPermissionProfile>()
+                         .is_some();
+@@ -806,6 +810,18 @@ impl App {
+                 self.enqueue_thread_history_entry_response(thread_id, event)
+                     .await?;
+             }
++            AppEvent::RequestNextPromptSuggestion => {
++                self.request_next_prompt_suggestion(app_server);
++            }
++            AppEvent::NextPromptSuggestionReady {
++                generation,
++                thread_id,
++                latency_ms,
++                result,
++            } => {
++                self.handle_next_prompt_suggestion_ready(generation, thread_id, latency_ms, result);
++                tui.frame_requester().schedule_frame();
++            }
+             AppEvent::DiffResult(cwd, text) => {
+                 if cwds_differ(&cwd, self.chat_widget.config_ref().cwd.as_path()) {
+                     return Ok(AppRunControl::Continue);
+diff --git a/codex-rs/tui/src/app/input.rs b/codex-rs/tui/src/app/input.rs
+index 814f8be3d5b32208d666fe22b5a6e2e971e18a41..ae2dc014ad3c8c6cbe90ecf715ff75a213f658f9 100644
+--- a/codex-rs/tui/src/app/input.rs
++++ b/codex-rs/tui/src/app/input.rs
+@@ -182,6 +182,11 @@ impl App {
+         app_server: &mut AppServerSession,
+         key_event: KeyEvent,
+     ) {
++        if self.next_prompt_suggestion_key_should_accept(key_event) {
++            self.accept_next_prompt_suggestion();
++            return;
++        }
++
+         // Some terminals, especially on macOS, encode Option+Left/Right as Option+b/f unless
+         // enhanced keyboard reporting is available. We only treat those word-motion fallbacks as
+         // agent-switch shortcuts when the composer is empty so we never steal the expected
+diff --git a/codex-rs/tui/src/app/next_prompt_suggestion.rs b/codex-rs/tui/src/app/next_prompt_suggestion.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..7781b74c85ccfe5f47d44aca337b32606e7f424b
+--- /dev/null
++++ b/codex-rs/tui/src/app/next_prompt_suggestion.rs
+@@ -0,0 +1,140 @@
++//! Owns asynchronous next-prompt suggestion state for the active TUI thread.
++
++use super::*;
++
++impl App {
++    pub(super) fn next_prompt_suggestion_action(event: &ThreadBufferedEvent) -> Option<bool> {
++        match event {
++            ThreadBufferedEvent::Notification(notification) => match notification.as_ref() {
++                ServerNotification::TurnStarted(_) => Some(false),
++                ServerNotification::TurnCompleted(notification) => match notification.turn.status {
++                    TurnStatus::Completed => Some(true),
++                    TurnStatus::Interrupted | TurnStatus::Failed => Some(false),
++                    TurnStatus::InProgress => None,
++                },
++                _ => None,
++            },
++            _ => None,
++        }
++    }
++
++    pub(crate) fn clear_next_prompt_suggestion(&mut self) {
++        self.cancel_pending_next_prompt_suggestion();
++        self.chat_widget.clear_next_prompt_suggestion();
++    }
++
++    pub(super) fn request_next_prompt_suggestion(&mut self, app_server: &AppServerSession) {
++        let Some(thread_id) = self.current_displayed_thread_id() else {
++            return;
++        };
++        if self.chat_widget.side_conversation_active()
++            || !self.chat_widget.can_show_next_prompt_suggestion()
++        {
++            return;
++        }
++
++        self.cancel_pending_next_prompt_suggestion();
++        self.chat_widget.clear_next_prompt_suggestion();
++        self.next_prompt_suggestion_generation = self
++            .next_prompt_suggestion_generation
++            .saturating_add(/*rhs*/ 1);
++        let generation = self.next_prompt_suggestion_generation;
++        let request_handle = app_server.request_handle();
++        let cancellation_token = format!("next-prompt-suggestion-{}", Uuid::new_v4());
++        let cancel_request = NextPromptSuggestionCancelRequest {
++            request_handle: request_handle.clone(),
++            thread_id,
++            cancellation_token: cancellation_token.clone(),
++        };
++        let app_event_tx = self.app_event_tx.clone();
++        let task = tokio::spawn(async move {
++            let requested_at = Instant::now();
++            let result = super::background_requests::fetch_next_prompt_suggestion(
++                request_handle,
++                thread_id,
++                cancellation_token,
++            )
++            .await
++            .map_err(|err| format!("{err:#}"));
++            app_event_tx.send(AppEvent::NextPromptSuggestionReady {
++                generation,
++                thread_id,
++                latency_ms: u64::try_from(requested_at.elapsed().as_millis()).unwrap_or(u64::MAX),
++                result,
++            });
++        });
++        self.pending_next_prompt_suggestion = Some(PendingNextPromptSuggestion {
++            task,
++            cancel_request,
++        });
++    }
++
++    pub(super) fn handle_next_prompt_suggestion_ready(
++        &mut self,
++        generation: u64,
++        thread_id: ThreadId,
++        latency_ms: u64,
++        result: Result<Option<String>, String>,
++    ) {
++        if generation != self.next_prompt_suggestion_generation
++            || self.current_displayed_thread_id() != Some(thread_id)
++        {
++            return;
++        }
++        self.pending_next_prompt_suggestion = None;
++        match result {
++            Ok(suggestion) => {
++                tracing::debug!(
++                    latency_ms,
++                    has_suggestion = suggestion.is_some(),
++                    "next prompt suggestion request finished"
++                );
++                self.chat_widget.set_next_prompt_suggestion(suggestion);
++            }
++            Err(err) => tracing::debug!(
++                latency_ms,
++                error = %err,
++                "next prompt suggestion request failed"
++            ),
++        }
++    }
++
++    pub(super) fn cancel_pending_next_prompt_suggestion(&mut self) {
++        if let Some(pending) = self.pending_next_prompt_suggestion.take() {
++            pending.task.abort();
++            tokio::spawn(async move {
++                if let Err(err) = super::background_requests::cancel_next_prompt_suggestion(
++                    pending.cancel_request.request_handle,
++                    pending.cancel_request.thread_id,
++                    pending.cancel_request.cancellation_token,
++                )
++                .await
++                {
++                    tracing::debug!(error = %err, "next prompt suggestion cancellation failed");
++                }
++            });
++        }
++        self.next_prompt_suggestion_generation = self
++            .next_prompt_suggestion_generation
++            .saturating_add(/*rhs*/ 1);
++    }
++
++    pub(crate) fn accept_next_prompt_suggestion(&mut self) -> bool {
++        self.cancel_pending_next_prompt_suggestion();
++        self.chat_widget.accept_next_prompt_suggestion()
++    }
++
++    pub(crate) fn next_prompt_suggestion_key_should_accept(&self, key_event: KeyEvent) -> bool {
++        self.chat_widget.can_show_next_prompt_suggestion()
++            && self.chat_widget.has_next_prompt_suggestion()
++            && matches!(
++                key_event,
++                KeyEvent {
++                    code: KeyCode::Tab | KeyCode::Right,
++                    modifiers: KeyModifiers::NONE,
++                    kind: KeyEventKind::Press,
++                    ..
++                }
++            )
++    }
++}
+diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
+index 9cbeee0883bebbc18c88193acfab830c9aefdbeb..2ed0ba73149b04ffe82f68b321f98e520b0142b6 100644
+--- a/codex-rs/tui/src/app/session_lifecycle.rs
++++ b/codex-rs/tui/src/app/session_lifecycle.rs
+@@ -440,6 +440,7 @@ impl App {
+     /// replacement widget so that replayed collab items render agent names immediately.
+     pub(super) fn replace_chat_widget(&mut self, mut chat_widget: ChatWidget) {
+         self.commit_animation = None;
++        self.clear_next_prompt_suggestion();
+         // Transfer the last-written terminal title to the replacement widget
+         // so it knows what OSC title is currently displayed. Without this, the
+         // new widget would redundantly clear and rewrite the same title, causing
+@@ -620,6 +621,7 @@ impl App {
+     }
+ 
+     pub(super) fn reset_thread_event_state(&mut self) {
++        self.clear_next_prompt_suggestion();
+         self.abort_all_thread_event_listeners();
+         self.thread_event_channels.clear();
+         self.agent_navigation.clear();
+diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
+index 6756b2029417a359fd75ba0c61355ab7b96e2559..44e5ecb1573468128f60352e450e3f718327e6a7 100644
+--- a/codex-rs/tui/src/app/startup.rs
++++ b/codex-rs/tui/src/app/startup.rs
+@@ -534,6 +534,8 @@ See the Codex keymap documentation for supported actions and examples."
+             dynamic_tool_status_updates,
+             dynamic_tool_tasks: HashMap::new(),
+             pending_startup_thread_start,
++            next_prompt_suggestion_generation: 0,
++            pending_next_prompt_suggestion: None,
+             startup_protected_input_boundary: true,
+             startup_pending_protected_request: false,
+             rate_limit_hard_stop_generation: 0,
+@@ -583,6 +585,7 @@ See the Codex keymap documentation for supported actions and examples."
+             {
+                 return shutdown_on_startup_error(app_server, err).await;
+             }
++            app.request_next_prompt_suggestion(&app_server);
+         }
+         let initial_session_ms = initial_session_started_at.elapsed().as_millis();
+ 
+diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
+index c8a891e1a6cbc31e0051dc4db59532af3cd25683..015d15b8c1251fbdbd4b4dda39f0c623acf68358 100644
+--- a/codex-rs/tui/src/app/test_support.rs
++++ b/codex-rs/tui/src/app/test_support.rs
+@@ -76,6 +76,8 @@ pub(super) async fn make_test_app() -> App {
+         dynamic_tool_status_updates: tokio::sync::broadcast::channel(/*capacity*/ 64).0,
+         dynamic_tool_tasks: HashMap::new(),
+         pending_startup_thread_start: false,
++        next_prompt_suggestion_generation: 0,
++        pending_next_prompt_suggestion: None,
+         startup_protected_input_boundary: false,
+         startup_pending_protected_request: false,
+         rate_limit_hard_stop_generation: 0,
+diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
+index adeca53331f295a7e93bc8cf485c5826d8146f43..7ecc4a6c09cc03bd624ea1699024284e6815f884 100644
+--- a/codex-rs/tui/src/app/tests.rs
++++ b/codex-rs/tui/src/app/tests.rs
+@@ -17,6 +17,8 @@ mod key_chords;
+ #[path = "tests/mcp_startup.rs"]
+ mod mcp_startup;
+ mod model_catalog;
++mod next_prompt_suggestion;
++mod next_prompt_suggestion_submission;
+ #[path = "tests/patch_approval_tests.rs"]
+ mod patch_approval_tests;
+ #[path = "tests/permission_shortcuts_tests.rs"]
+@@ -5473,6 +5475,8 @@ async fn make_test_app() -> App {
+         dynamic_tool_status_updates: tokio::sync::broadcast::channel(/*capacity*/ 64).0,
+         dynamic_tool_tasks: HashMap::new(),
+         pending_startup_thread_start: false,
++        next_prompt_suggestion_generation: 0,
++        pending_next_prompt_suggestion: None,
+         startup_protected_input_boundary: false,
+         startup_pending_protected_request: false,
+         rate_limit_hard_stop_generation: 0,
+@@ -5555,6 +5559,8 @@ async fn make_test_app_with_channels() -> (
+             dynamic_tool_status_updates: tokio::sync::broadcast::channel(/*capacity*/ 64).0,
+             dynamic_tool_tasks: HashMap::new(),
+             pending_startup_thread_start: false,
++            next_prompt_suggestion_generation: 0,
++            pending_next_prompt_suggestion: None,
+             startup_protected_input_boundary: false,
+             startup_pending_protected_request: false,
+             rate_limit_hard_stop_generation: 0,
+diff --git a/codex-rs/tui/src/app/tests/next_prompt_suggestion.rs b/codex-rs/tui/src/app/tests/next_prompt_suggestion.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..57e84fa4085ca1af3571bd67ea2edd3c2abdfaed
+--- /dev/null
++++ b/codex-rs/tui/src/app/tests/next_prompt_suggestion.rs
+@@ -0,0 +1,255 @@
++use super::*;
++use pretty_assertions::assert_eq;
++
++async fn input_harness(app: &App) -> Result<(AppServerSession, tui::Tui)> {
++    let app_server =
++        crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
++    Ok((app_server, crate::tui::test_support::make_test_tui()?))
++}
++
++#[tokio::test]
++async fn tab_and_right_accept_without_submitting() -> Result<()> {
++    for code in [KeyCode::Tab, KeyCode::Right] {
++        let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
++        app.chat_widget
++            .set_next_prompt_suggestion(Some("run the tests".to_string()));
++        let (mut app_server, mut tui) = input_harness(&app).await?;
++
++        app.handle_key_event(
++            &mut tui,
++            &mut app_server,
++            KeyEvent::new(code, KeyModifiers::NONE),
++        )
++        .await;
++
++        assert_eq!(
++            app.chat_widget.composer_text_with_pending(),
++            "run the tests"
++        );
++        assert!(app.chat_widget.next_prompt_suggestion().is_none());
++        assert!(op_rx.try_recv().is_err());
++    }
++    Ok(())
++}
++
++#[tokio::test]
++async fn enter_does_not_accept_or_submit_ghost_text() -> Result<()> {
++    let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
++    app.chat_widget
++        .set_next_prompt_suggestion(Some("run the tests".to_string()));
++    let (mut app_server, mut tui) = input_harness(&app).await?;
++
++    app.handle_key_event(
++        &mut tui,
++        &mut app_server,
++        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
++    )
++    .await;
++
++    assert!(app.chat_widget.composer_text_with_pending().is_empty());
++    assert!(app.chat_widget.composer_is_empty());
++    assert_eq!(
++        app.chat_widget.next_prompt_suggestion(),
++        Some("run the tests")
++    );
++    assert!(op_rx.try_recv().is_err());
++    Ok(())
++}
++
++#[tokio::test]
++async fn manual_typing_hides_ghost_text_without_discarding_it() -> Result<()> {
++    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
++    app.chat_widget
++        .set_next_prompt_suggestion(Some("run the tests".to_string()));
++    let (mut app_server, mut tui) = input_harness(&app).await?;
++
++    app.handle_key_event(
++        &mut tui,
++        &mut app_server,
++        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
++    )
++    .await;
++
++    assert!(app.chat_widget.composer_text_with_pending().is_empty());
++    assert!(!app.chat_widget.composer_is_empty());
++    assert_eq!(
++        app.chat_widget.next_prompt_suggestion(),
++        Some("run the tests")
++    );
++    assert!(!app.chat_widget.can_show_next_prompt_suggestion());
++    Ok(())
++}
++
++#[tokio::test]
++async fn clearing_manual_draft_restores_ghost_text() -> Result<()> {
++    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
++    app.chat_widget
++        .set_next_prompt_suggestion(Some("run the tests".to_string()));
++    let (mut app_server, mut tui) = input_harness(&app).await?;
++    app.handle_key_event(
++        &mut tui,
++        &mut app_server,
++        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
++    )
++    .await;
++    assert!(app.chat_widget.composer_text_with_pending().is_empty());
++    assert!(!app.chat_widget.composer_is_empty());
++    assert_eq!(
++        app.chat_widget.next_prompt_suggestion(),
++        Some("run the tests")
++    );
++    assert!(!app.chat_widget.can_show_next_prompt_suggestion());
++
++    app.handle_key_event(
++        &mut tui,
++        &mut app_server,
++        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
++    )
++    .await;
++
++    assert!(app.chat_widget.composer_text_with_pending().is_empty());
++    assert!(app.chat_widget.composer_is_empty());
++    assert_eq!(
++        app.chat_widget.next_prompt_suggestion(),
++        Some("run the tests")
++    );
++    assert!(app.chat_widget.can_show_next_prompt_suggestion());
++    assert!(render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("run the tests"));
++    Ok(())
++}
++
++#[tokio::test]
++async fn paste_hides_ghost_text_without_discarding_it() {
++    let mut app = make_test_app().await;
++    app.chat_widget
++        .set_next_prompt_suggestion(Some("run the tests".to_string()));
++
++    app.chat_widget.handle_paste("draft".to_string());
++
++    assert_eq!(
++        app.chat_widget.next_prompt_suggestion(),
++        Some("run the tests")
++    );
++    assert!(!app.chat_widget.can_show_next_prompt_suggestion());
++}
++
++#[tokio::test]
++async fn suggestion_acceptance_keys_follow_composer_emptiness() {
++    let mut app = make_test_app().await;
++    app.chat_widget
++        .set_next_prompt_suggestion(Some("run the tests".to_string()));
++    app.chat_widget.apply_external_edit("draft".to_string());
++
++    for code in [KeyCode::Tab, KeyCode::Right] {
++        assert!(
++            !app.next_prompt_suggestion_key_should_accept(KeyEvent::new(code, KeyModifiers::NONE,))
++        );
++    }
++
++    app.chat_widget.apply_external_edit(String::new());
++    for code in [KeyCode::Tab, KeyCode::Right] {
++        assert!(
++            app.next_prompt_suggestion_key_should_accept(KeyEvent::new(code, KeyModifiers::NONE,))
++        );
++    }
++}
++
++#[tokio::test]
++async fn stale_generation_is_ignored() {
++    let mut app = make_test_app().await;
++    let thread_id = ThreadId::new();
++    app.active_thread_id = Some(thread_id);
++    app.next_prompt_suggestion_generation = 2;
++
++    app.handle_next_prompt_suggestion_ready(
++        /*generation*/ 1,
++        thread_id,
++        /*latency_ms*/ 0,
++        Ok(Some("run the tests".to_string())),
++    );
++
++    assert!(app.chat_widget.next_prompt_suggestion().is_none());
++}
++
++#[tokio::test]
++async fn matching_suggestion_received_with_draft_is_revealed_after_clear() {
++    let mut app = make_test_app().await;
++    let thread_id = ThreadId::new();
++    app.active_thread_id = Some(thread_id);
++    app.next_prompt_suggestion_generation = 1;
++    app.chat_widget.apply_external_edit("draft".to_string());
++
++    app.handle_next_prompt_suggestion_ready(
++        /*generation*/ 1,
++        thread_id,
++        /*latency_ms*/ 0,
++        Ok(Some("run the tests".to_string())),
++    );
++
++    assert_eq!(
++        app.chat_widget.next_prompt_suggestion(),
++        Some("run the tests")
++    );
++    assert!(!app.chat_widget.can_show_next_prompt_suggestion());
++    assert!(!render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("run the tests"));
++
++    app.chat_widget.apply_external_edit(String::new());
++
++    assert!(app.chat_widget.can_show_next_prompt_suggestion());
++    assert!(render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("run the tests"));
++}
++
++#[tokio::test]
++async fn turn_started_invalidates_older_suggestion_generation() -> Result<()> {
++    let mut app = make_test_app().await;
++    let thread_id = ThreadId::new();
++    app.thread_event_channels
++        .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 2));
++    app.activate_thread_channel(thread_id).await;
++    app.next_prompt_suggestion_generation = 1;
++    app.chat_widget
++        .set_next_prompt_suggestion(Some("old suggestion".to_string()));
++    app.enqueue_thread_notification(thread_id, turn_started_notification(thread_id, "turn-1"))
++        .await?;
++    let mut tui = crate::tui::test_support::make_test_tui()?;
++
++    app.drain_active_thread_events(&mut tui).await?;
++    app.handle_next_prompt_suggestion_ready(
++        /*generation*/ 1,
++        thread_id,
++        /*latency_ms*/ 0,
++        Ok(Some("stale suggestion".to_string())),
++    );
++
++    assert!(app.chat_widget.next_prompt_suggestion().is_none());
++    Ok(())
++}
++
++#[tokio::test]
++async fn startup_drain_requests_suggestion_after_first_completed_turn() -> Result<()> {
++    // Given: the first active thread completes while startup drains its queued events.
++    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
++    while app_event_rx.try_recv().is_ok() {}
++    let thread_id = ThreadId::new();
++    app.thread_event_channels
++        .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 2));
++    app.activate_thread_channel(thread_id).await;
++    for event in [
++        turn_started_notification(thread_id, "turn-1"),
++        turn_completed_notification(thread_id, "turn-1", TurnStatus::Completed),
++    ] {
++        app.enqueue_thread_notification(thread_id, event).await?;
++    }
++    let mut tui = crate::tui::test_support::make_test_tui()?;
++
++    // When: startup drains the first turn instead of the foreground event branch.
++    app.drain_active_thread_events(&mut tui).await?;
++
++    // Then: the normal UI event path must still request the next-prompt suggestion.
++    assert!(
++        std::iter::from_fn(|| app_event_rx.try_recv().ok())
++            .any(|event| matches!(event, AppEvent::RequestNextPromptSuggestion)),
++        "startup drain dropped the next-prompt suggestion request"
++    );
++    Ok(())
++}
+diff --git a/codex-rs/tui/src/app/tests/next_prompt_suggestion_submission.rs b/codex-rs/tui/src/app/tests/next_prompt_suggestion_submission.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..52d8ecb1e335698198d9c16f827e49eb07059078
+--- /dev/null
++++ b/codex-rs/tui/src/app/tests/next_prompt_suggestion_submission.rs
+@@ -0,0 +1,53 @@
++use super::*;
++use crate::chatwidget::UserMessage;
++use pretty_assertions::assert_eq;
++
++#[test]
++fn successful_turn_submission_clears_suggestion_and_cancels_request() -> Result<()> {
++    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
++
++    std::thread::Builder::new()
++        .name("next-prompt-submission".to_string())
++        .stack_size(TEST_STACK_SIZE_BYTES)
++        .spawn(|| {
++            let runtime = tokio::runtime::Builder::new_current_thread()
++                .enable_all()
++                .build()?;
++            runtime.block_on(async {
++                let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
++                let mut tui = crate::tui::test_support::make_test_tui()?;
++                let mut app_server =
++                    Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
++                let started = app_server.start_thread(&app.config).await?;
++                app.enqueue_primary_thread_session(started.session, started.turns)
++                    .await?;
++                app.request_next_prompt_suggestion(&app_server);
++                assert!(app.pending_next_prompt_suggestion.is_some());
++                app.chat_widget
++                    .set_next_prompt_suggestion(Some("run the tests".to_string()));
++                app.chat_widget
++                    .restore_user_message_to_composer(UserMessage::from("new prompt"));
++
++                app.chat_widget
++                    .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
++                let op = next_user_turn_op(&mut op_rx);
++                let generation_before_submission = app.next_prompt_suggestion_generation;
++                assert_eq!(
++                    app.chat_widget.next_prompt_suggestion(),
++                    Some("run the tests")
++                );
++                assert!(!app.chat_widget.can_show_next_prompt_suggestion());
++
++                Box::pin(app.handle_event(&mut tui, &mut app_server, AppEvent::CodexOp(op)))
++                    .await?;
++
++                assert!(app.chat_widget.next_prompt_suggestion().is_none());
++                assert!(app.pending_next_prompt_suggestion.is_none());
++                assert!(app.next_prompt_suggestion_generation > generation_before_submission);
++                app_server.shutdown().await?;
++                Ok(())
++            })
++        })?
++        .join()
++        .expect("next prompt submission test thread")
++}
+diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
+index 4124c62914c4247aca13d15d13764780c023c695..befb7be8aaa98d97f0ec902b338ceba11dcdc6e7 100644
+--- a/codex-rs/tui/src/app/thread_routing.rs
++++ b/codex-rs/tui/src/app/thread_routing.rs
+@@ -1492,8 +1492,16 @@ impl App {
+         loop {
+             match rx.try_recv() {
+                 Ok(event) => {
++                    let next_prompt_suggestion_action = Self::next_prompt_suggestion_action(&event);
+                     self.handle_thread_event_now_recovering_file_changes(event)
+-                        .await
++                        .await;
++                    match next_prompt_suggestion_action {
++                        Some(true) => self
++                            .app_event_tx
++                            .send(AppEvent::RequestNextPromptSuggestion),
++                        Some(false) => self.clear_next_prompt_suggestion(),
++                        None => {}
++                    }
+                 }
+                 Err(TryRecvError::Empty) => break,
+                 Err(TryRecvError::Disconnected) => {
+@@ -1774,6 +1782,7 @@ impl App {
+         app_server: &mut AppServerSession,
+         event: ThreadBufferedEvent,
+     ) -> Result<()> {
++        let next_prompt_suggestion_action = Self::next_prompt_suggestion_action(&event);
+         // Capture this before any potential thread switch: we only want to clear
+         // the exit marker when the currently active thread acknowledges shutdown.
+         let pending_shutdown_exit_completed = matches!(
+@@ -1880,6 +1889,11 @@ impl App {
+                 }
+             }
+         }
++        match next_prompt_suggestion_action {
++            Some(true) => self.request_next_prompt_suggestion(app_server),
++            Some(false) => self.clear_next_prompt_suggestion(),
++            None => {}
++        }
+         if !had_active_view
+             && self.chat_widget.has_active_view()
+             && self.startup_protected_input_boundary
+diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
+index bb5b57aa3da561bd4e60c27b671457c0a3fb6d32..cbfc4ea4a2d33358380b07ce36fbc4988686fc2a 100644
+--- a/codex-rs/tui/src/app_event.rs
++++ b/codex-rs/tui/src/app_event.rs
+@@ -307,6 +307,17 @@ pub(crate) enum AppEvent {
+         event: HistoryLookupResponse,
+     },
+ 
++    /// Requests a next-prompt prediction after a completed turn was drained at startup.
++    RequestNextPromptSuggestion,
++
++    /// Delivers one background next-prompt result back onto the UI thread.
++    NextPromptSuggestionReady {
++        generation: u64,
++        thread_id: ThreadId,
++        latency_ms: u64,
++        result: Result<Option<String>, String>,
++    },
++
+     /// Refill terminal scrollback from older paginated history after its rows reflow.
+     RequestOlderScrollbackHistory {
+         thread_id: ThreadId,
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 4b601e5728f48763079c0ba55c0063c91db10a52..0c38cd5d14660445eed52da6f185dd7cb524439d 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -386,6 +386,7 @@ mod plan_implementation;
+ use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
+ mod model_popup_state;
+ mod model_popups;
++mod next_prompt_suggestion;
+ mod notifications;
+ use self::notifications::Notification;
+ mod permission_popups;
+@@ -681,6 +682,8 @@ pub(crate) struct ChatWidget {
+     misalignment_policy_violation: bool,
+     normal_placeholder_text: String,
+     side_placeholder_text: String,
++    /// Latest prediction, stored separately from editable composer text.
++    next_prompt_suggestion: Option<String>,
+     forked_from: Option<ThreadId>,
+     interrupted_turn_notice_mode: InterruptedTurnNoticeMode,
+     frame_requester: FrameRequester,
+diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
+index a1079ac7c43dec60e471e8b469b3d24aef297bdd..c2de0e729d5743946e36ac142ba0e18f2a68753c 100644
+--- a/codex-rs/tui/src/chatwidget/constructor.rs
++++ b/codex-rs/tui/src/chatwidget/constructor.rs
+@@ -210,6 +210,7 @@ impl ChatWidget {
+             misalignment_policy_violation: false,
+             normal_placeholder_text: placeholder,
+             side_placeholder_text: side_placeholder,
++            next_prompt_suggestion: None,
+             forked_from: None,
+             interrupted_turn_notice_mode: InterruptedTurnNoticeMode::Default,
+             input_queue: InputQueueState::default(),
+diff --git a/codex-rs/tui/src/chatwidget/next_prompt_suggestion.rs b/codex-rs/tui/src/chatwidget/next_prompt_suggestion.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b41c11ecd0f20ddb2e3b3fd07f769a75154a5e62
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/next_prompt_suggestion.rs
+@@ -0,0 +1,66 @@
++//! Projects stored next-prompt suggestions into the composer placeholder.
++
++use super::*;
++
++impl ChatWidget {
++    pub(crate) fn set_next_prompt_suggestion(&mut self, suggestion: Option<String>) {
++        self.next_prompt_suggestion = suggestion;
++        self.refresh_composer_placeholder();
++    }
++
++    pub(crate) fn clear_next_prompt_suggestion(&mut self) -> bool {
++        if self.next_prompt_suggestion.take().is_none() {
++            return false;
++        }
++        self.refresh_composer_placeholder();
++        true
++    }
++
++    #[cfg(test)]
++    pub(crate) fn next_prompt_suggestion(&self) -> Option<&str> {
++        self.next_prompt_suggestion.as_deref()
++    }
++
++    pub(crate) fn has_next_prompt_suggestion(&self) -> bool {
++        self.next_prompt_suggestion.is_some()
++    }
++
++    pub(crate) fn accept_next_prompt_suggestion(&mut self) -> bool {
++        let Some(suggestion) = self.next_prompt_suggestion.take() else {
++            return false;
++        };
++        self.refresh_composer_placeholder();
++        self.bottom_pane
++            .set_composer_text(suggestion, Vec::new(), Vec::new());
++        true
++    }
++
++    pub(crate) fn can_show_next_prompt_suggestion(&self) -> bool {
++        self.composer_is_empty() && self.composer_allows_next_prompt_suggestion()
++    }
++
++    fn composer_allows_next_prompt_suggestion(&self) -> bool {
++        self.bottom_pane.no_modal_or_popup_active()
++            && !self.active_side_conversation
++            && !self.blocks_direct_input
++            && !self.misalignment_policy_violation
++            && self.active_mode_kind() != ModeKind::Plan
++            && self.last_non_retry_error.is_none()
++            && self.codex_rate_limit_reached_type.is_none()
++            && !self.bottom_pane.is_task_running()
++            && !self.input_queue.user_turn_pending_start
++    }
++
++    pub(crate) fn refresh_composer_placeholder(&mut self) {
++        let placeholder = if self.active_side_conversation {
++            self.side_placeholder_text.clone()
++        } else if self.composer_allows_next_prompt_suggestion()
++            && let Some(suggestion) = self.next_prompt_suggestion.as_ref()
++        {
++            suggestion.clone()
++        } else {
++            self.normal_placeholder_text.clone()
++        };
++        self.bottom_pane.set_placeholder_text(placeholder);
++    }
++}
+diff --git a/codex-rs/tui/src/chatwidget/side.rs b/codex-rs/tui/src/chatwidget/side.rs
+index 7e0726430d1e9493331d1e7ccccbf44d658f5a34..493c3ae440e048f49e314bb6eda815209a16a544 100644
+--- a/codex-rs/tui/src/chatwidget/side.rs
++++ b/codex-rs/tui/src/chatwidget/side.rs
+@@ -16,12 +16,7 @@ impl ChatWidget {
+ 
+     pub(crate) fn set_side_conversation_active(&mut self, active: bool) {
+         self.active_side_conversation = active;
+-        let placeholder = if active {
+-            self.side_placeholder_text.clone()
+-        } else {
+-            self.normal_placeholder_text.clone()
+-        };
+-        self.bottom_pane.set_placeholder_text(placeholder);
++        self.refresh_composer_placeholder();
+         self.bottom_pane.set_side_conversation_active(active);
+         if self.blocks_direct_input && !active {
+             self.bottom_pane.set_parent_owned_thread();
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__next_prompt_suggestion_renders_as_empty_composer_placeholder.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__next_prompt_suggestion_renders_as_empty_composer_placeholder.snap
+new file mode 100644
+index 0000000000000000000000000000000000000000..416dfaa9d514d1ddb3c06991da7a77c5f51b0622
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__next_prompt_suggestion_renders_as_empty_composer_placeholder.snap
+@@ -0,0 +1,10 @@
++---
++source: tui/src/chatwidget/tests/next_prompt_suggestion.rs
++assertion_line: 19
++expression: normalized_backend_snapshot(terminal.backend())
++---
++"                                                                                "
++"                                                                                "
++"› run the tests                                                                 "
++"                                                                                "
++"  gpt-5.6-sol default · /tmp/project                                            "
+diff --git a/codex-rs/tui/src/chatwidget/tests.rs b/codex-rs/tui/src/chatwidget/tests.rs
+index d59533eb295740a3ceb3ffbf6a16558d94a9579f..554535f1d48aee270dc24a9207e22345e98b22e9 100644
+--- a/codex-rs/tui/src/chatwidget/tests.rs
++++ b/codex-rs/tui/src/chatwidget/tests.rs
+@@ -247,6 +247,7 @@ mod history_replay;
+ mod mcp_startup;
+ #[path = "tests/misalignment_policy_tests.rs"]
+ mod misalignment_policy;
++mod next_prompt_suggestion;
+ #[path = "tests/permission_shortcuts_tests.rs"]
+ mod permission_shortcuts_tests;
+ mod permissions;
+diff --git a/codex-rs/tui/src/chatwidget/tests/next_prompt_suggestion.rs b/codex-rs/tui/src/chatwidget/tests/next_prompt_suggestion.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..68f828349ae170d80cd0914036eb28456bbcef7b
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/tests/next_prompt_suggestion.rs
+@@ -0,0 +1,41 @@
++use super::helpers::make_chatwidget_manual;
++use super::helpers::normalized_backend_snapshot;
++use super::*;
++use ratatui::Terminal;
++use ratatui::backend::TestBackend;
++
++#[tokio::test]
++async fn next_prompt_suggestion_renders_as_empty_composer_placeholder_snapshot() {
++    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
++    chat.show_welcome_banner = false;
++    chat.set_next_prompt_suggestion(Some("run the tests".to_string()));
++
++    let width = 80;
++    let height = chat.desired_height(width);
++    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
++    terminal
++        .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
++        .expect("draw next prompt suggestion placeholder");
++    assert_chatwidget_snapshot!(
++        "next_prompt_suggestion_renders_as_empty_composer_placeholder",
++        normalized_backend_snapshot(terminal.backend())
++    );
++}
++
++#[tokio::test]
++async fn next_prompt_suggestion_is_suppressed_outside_idle_default_composer() {
++    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
++    chat.set_next_prompt_suggestion(Some("run the tests".to_string()));
++    assert!(chat.can_show_next_prompt_suggestion());
++
++    chat.on_task_started();
++    assert!(!chat.can_show_next_prompt_suggestion());
++    chat.on_task_complete(
++        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
++    );
++
++    let plan_mask = collaboration_modes::plan_mask(chat.model_catalog.as_ref())
++        .expect("expected plan collaboration mode");
++    chat.set_collaboration_mask(plan_mask);
++    assert!(!chat.can_show_next_prompt_suggestion());
++}
