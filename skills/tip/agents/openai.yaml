@@ -1,0 +1,7 @@
+interface:
+  display_name: "Next Prompt Tip"
+  short_description: "Predict the user's likely next prompt"
+  default_prompt: "Use $tip to predict my likely next prompt."
+
+policy:
+  allow_implicit_invocation: false
