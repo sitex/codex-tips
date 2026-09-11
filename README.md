@@ -53,8 +53,8 @@ The installers support x86_64 Linux, macOS, and native Windows. See the
 [Codex 0.154.0 full-platform build results](https://github.com/sitex/codex-tips/actions/runs/34577691112)
 for source installation and command startup checks on those platforms. ARM64
 packages exist upstream but are not release-gated by this project yet. The
-installer builds Codex from source, so installation can take tens of minutes
-(longer on slower systems) and use several gigabytes of disk.
+installer builds Codex from source, so installation can take from tens of minutes
+to several hours and use several gigabytes of disk.
 
 Requirements:
 

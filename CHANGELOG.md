@@ -19,6 +19,7 @@ All notable changes to this project are documented here.
 - Compare raw PowerShell exception messages so terminal wrapping does not break
   the unsupported-version regression check.
 - Allow selecting a single Codex version for the full-platform build workflow.
+- Document that source builds can take from tens of minutes to several hours.
 - Preserve upstream worktree, read-only session, and model picker behavior while
   retaining suggestion acceptance, cancellation, and stale-result protection.
 
