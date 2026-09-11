@@ -87,7 +87,7 @@ try {
     $unsupportedOutput = & pwsh -NoProfile -File $installer 2>&1
     if ($LASTEXITCODE -eq 0) { throw "unsupported Codex version unexpectedly succeeded" }
     if (($unsupportedOutput | Out-String) -notmatch "unsupported Codex version 0.154.1; supported versions: 0.151.0, 0.152.0, 0.152.1, 0.153.2, 0.153.4, 0.154.0") {
-        throw "unsupported version failure did not explain the compatibility boundary"
+        throw "unsupported version failure did not explain the compatibility boundary: $($unsupportedOutput | Out-String)"
     }
     $global:LASTEXITCODE = 0
 } finally {
