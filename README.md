@@ -34,7 +34,7 @@ The current checkout supports these exact Codex CLI versions:
 
 | Codex CLI | Pinned upstream commit |
 | --- | --- |
-| `0.154.0` (latest port; platform verification pending) | `6b9826e3aa83b1a5947db50f4332cb9c65f1b340` |
+| `0.154.0` (latest) | `6b9826e3aa83b1a5947db50f4332cb9c65f1b340` |
 | `0.153.4` | `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a` |
 | `0.153.2` | `657a993cbee87acf52d14b758ce49dbd46d1b8eb` |
 | `0.152.1` | `5adb68a49933ae446bf11935662c83dba55a0804` |
@@ -49,11 +49,12 @@ The installer detects the official Codex version and selects the matching
 attempting an unverified patch port. All supported versions use the same
 hide-while-typing, clear-to-restore, and stale-to-discard suggestion behavior.
 
-The installers support x86_64 Linux, macOS, and native Windows. Full-platform
-verification for Codex 0.154.0 is pending. ARM64 packages exist upstream but are
-not release-gated by this project yet. The
-installer builds Codex from source, so installation can take several minutes and
-use several gigabytes of disk.
+The installers support x86_64 Linux, macOS, and native Windows. See the
+[Codex 0.154.0 full-platform build results](https://github.com/sitex/codex-tips/actions/runs/34577691112)
+for source installation and command startup checks on those platforms. ARM64
+packages exist upstream but are not release-gated by this project yet. The
+installer builds Codex from source, so installation can take tens of minutes
+(longer on slower systems) and use several gigabytes of disk.
 
 Requirements:
 

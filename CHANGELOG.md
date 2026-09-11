@@ -16,6 +16,8 @@ All notable changes to this project are documented here.
 ### Changed
 
 - Cover all six saved versions in both installers, regression tests, and CI.
+- Compare raw PowerShell exception messages so terminal wrapping does not break
+  the unsupported-version regression check.
 - Allow selecting a single Codex version for the full-platform build workflow.
 - Preserve upstream worktree, read-only session, and model picker behavior while
   retaining suggestion acceptance, cancellation, and stale-result protection.
