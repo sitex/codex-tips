@@ -16,7 +16,11 @@ mkdir -p \
 cp "$repo_root/bin/install-codex-tips" "$installer"
 touch \
   "$test_repo/patches/codex-tips/rust-v0.151.0.patch" \
-  "$test_repo/patches/codex-tips/rust-v0.152.0.patch"
+  "$test_repo/patches/codex-tips/rust-v0.152.0.patch" \
+  "$test_repo/patches/codex-tips/rust-v0.152.1.patch" \
+  "$test_repo/patches/codex-tips/rust-v0.153.2.patch" \
+  "$test_repo/patches/codex-tips/rust-v0.153.4.patch" \
+  "$test_repo/patches/codex-tips/rust-v0.154.0.patch"
 
 # Given a BSD-like userland that rejects GNU-only flags.
 real_readlink=$(command -v readlink)
@@ -121,10 +125,14 @@ exercise_fast_path() {
 
 exercise_fast_path 0.151.0
 exercise_fast_path 0.152.0
+exercise_fast_path 0.152.1
+exercise_fast_path 0.153.2
+exercise_fast_path 0.153.4
+exercise_fast_path 0.154.0
 
 # Given an installed Codex version without a matching release patch.
 unsupported_launcher="$fixture/codex-unsupported"
-printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "codex-cli 0.153.0"' >"$unsupported_launcher"
+printf '%s\n' '#!/bin/sh' 'printf "%s\\n" "codex-cli 0.154.1"' >"$unsupported_launcher"
 chmod 0755 "$unsupported_launcher"
 
 # When installation is attempted, then it fails before fetching or building upstream.
@@ -144,4 +152,4 @@ if unsupported_output=$(env \
   printf 'expected unsupported Codex version to fail\n' >&2
   exit 1
 fi
-[[ $unsupported_output == *'unsupported Codex version 0.153.0; supported versions: 0.151.0, 0.152.0'* ]]
+[[ $unsupported_output == *'unsupported Codex version 0.154.1; supported versions: 0.151.0, 0.152.0, 0.152.1, 0.153.2, 0.153.4, 0.154.0'* ]]

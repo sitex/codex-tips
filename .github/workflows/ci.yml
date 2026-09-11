@@ -42,6 +42,14 @@ jobs:
             commit: 78c290807ce710180111df227df3b7a4fe845452
           - version: "0.152.0"
             commit: 316795b3cf2a45e90d121d9f46499d4658b2645c
+          - version: "0.152.1"
+            commit: 5adb68a49933ae446bf11935662c83dba55a0804
+          - version: "0.153.2"
+            commit: 657a993cbee87acf52d14b758ce49dbd46d1b8eb
+          - version: "0.153.4"
+            commit: 3d2ee51ca2d5db578f328aa75e20aa22c0197c9a
+          - version: "0.154.0"
+            commit: 6b9826e3aa83b1a5947db50f4332cb9c65f1b340
     steps:
       - uses: actions/checkout@v4
       - name: Check pinned upstream patch

@@ -30,66 +30,74 @@ the patch continues to generate and display suggestions automatically.
 
 ## Compatibility
 
-Release 0.2.0 supports these exact Codex CLI versions:
+The current checkout supports these exact Codex CLI versions:
 
-- `0.152.0` (latest and recommended): upstream commit
-  `316795b3cf2a45e90d121d9f46499d4658b2645c`;
-- `0.151.0`: upstream commit
-  `78c290807ce710180111df227df3b7a4fe845452`.
+| Codex CLI | Pinned upstream commit |
+| --- | --- |
+| `0.154.0` (latest port; platform verification pending) | `6b9826e3aa83b1a5947db50f4332cb9c65f1b340` |
+| `0.153.4` | `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a` |
+| `0.153.2` | `657a993cbee87acf52d14b758ce49dbd46d1b8eb` |
+| `0.152.1` | `5adb68a49933ae446bf11935662c83dba55a0804` |
+| `0.152.0` | `316795b3cf2a45e90d121d9f46499d4658b2645c` |
+| `0.151.0` | `78c290807ce710180111df227df3b7a4fe845452` |
+
+Release 0.3.0 includes all six patches above. Install the matching official Codex
+package before running the installer.
 
 The installer detects the official Codex version and selects the matching
 `patches/codex-tips/rust-v<version>.patch`. It refuses other versions instead of
-attempting an unverified patch port. Both supported versions use the same
+attempting an unverified patch port. All supported versions use the same
 hide-while-typing, clear-to-restore, and stale-to-discard suggestion behavior.
 
-The release is tested on x86_64 builds of Linux, macOS, and native Windows. ARM64
-packages exist upstream but are not release-gated by this project yet. The
+The installers support x86_64 Linux, macOS, and native Windows. Full-platform
+verification for Codex 0.154.0 is pending. ARM64 packages exist upstream but are
+not release-gated by this project yet. The
 installer builds Codex from source, so installation can take several minutes and
 use several gigabytes of disk.
 
 Requirements:
 
-- an official Codex CLI 0.151.0 or 0.152.0 installation (0.152.0 recommended);
+- an official Codex CLI installation matching one of the versions above;
 - Git;
 - Rust and Cargo compatible with the upstream `rust-toolchain.toml`;
 - Bash 3.2 or newer on Linux and macOS, or PowerShell 7 on Windows.
 
-## Install 0.2.0
+## Install 0.3.0
 
 Prefer an agent-guided setup? Ask your coding LLM to follow
 [Install with an LLM](INSTALL_WITH_LLM.md).
 
 Download both assets from the
-[v0.2.0 release](https://github.com/sitex/codex-tips/releases/tag/v0.2.0):
+[v0.3.0 release](https://github.com/sitex/codex-tips/releases/tag/v0.3.0):
 
 ```text
-codex-tips-0.2.0.tar.gz
-codex-tips-0.2.0.tar.gz.sha256
+codex-tips-0.3.0.tar.gz
+codex-tips-0.3.0.tar.gz.sha256
 ```
 
 On Linux or macOS, verify and extract the release before running it:
 
 ```bash
-sha256sum -c codex-tips-0.2.0.tar.gz.sha256
-tar -xzf codex-tips-0.2.0.tar.gz
-cd codex-tips-0.2.0
+sha256sum -c codex-tips-0.3.0.tar.gz.sha256
+tar -xzf codex-tips-0.3.0.tar.gz
+cd codex-tips-0.3.0
 ./bin/install-codex-tips
 ```
 
 macOS provides `shasum` instead of `sha256sum` by default:
 
 ```bash
-shasum -a 256 -c codex-tips-0.2.0.tar.gz.sha256
+shasum -a 256 -c codex-tips-0.3.0.tar.gz.sha256
 ```
 
 On Windows, use PowerShell:
 
 ```powershell
-$expected = (Get-Content .\codex-tips-0.2.0.tar.gz.sha256).Split()[0]
-$actual = (Get-FileHash .\codex-tips-0.2.0.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant()
+$expected = (Get-Content .\codex-tips-0.3.0.tar.gz.sha256).Split()[0]
+$actual = (Get-FileHash .\codex-tips-0.3.0.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actual -ne $expected) { throw "release checksum mismatch" }
-tar -xzf .\codex-tips-0.2.0.tar.gz
-Set-Location .\codex-tips-0.2.0
+tar -xzf .\codex-tips-0.3.0.tar.gz
+Set-Location .\codex-tips-0.3.0
 $env:CODEX_TIPS_UPDATE_PATH = "1"
 .\bin\install-codex-tips.ps1
 ```
@@ -172,6 +180,10 @@ for patch in patches/codex-tips/rust-v*.patch; do
   case "$version" in
     0.151.0) commit=78c290807ce710180111df227df3b7a4fe845452 ;;
     0.152.0) commit=316795b3cf2a45e90d121d9f46499d4658b2645c ;;
+    0.152.1) commit=5adb68a49933ae446bf11935662c83dba55a0804 ;;
+    0.153.2) commit=657a993cbee87acf52d14b758ce49dbd46d1b8eb ;;
+    0.153.4) commit=3d2ee51ca2d5db578f328aa75e20aa22c0197c9a ;;
+    0.154.0) commit=6b9826e3aa83b1a5947db50f4332cb9c65f1b340 ;;
     *) echo "unpinned patch: $patch" >&2; exit 1 ;;
   esac
   upstream="/tmp/codex-tips-upstream-$version"

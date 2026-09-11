@@ -11,11 +11,11 @@ try {
     $installer = Join-Path $testBin "install-codex-tips.ps1"
     New-Item -ItemType Directory -Path $testBin, $testPatches | Out-Null
     Copy-Item -LiteralPath $sourceInstaller -Destination $installer
-    foreach ($version in "0.151.0", "0.152.0") {
+    foreach ($version in "0.151.0", "0.152.0", "0.152.1", "0.153.2", "0.153.4", "0.154.0") {
         [System.IO.File]::WriteAllText((Join-Path $testPatches "rust-v$version.patch"), "")
     }
 
-    foreach ($version in "0.151.0", "0.152.0") {
+    foreach ($version in "0.151.0", "0.152.0", "0.152.1", "0.153.2", "0.153.4", "0.154.0") {
         # Given a versioned official Windows runtime package and existing patched binary.
         $caseRoot = Join-Path $fixture "version-$version"
         New-Item -ItemType Directory -Path $caseRoot | Out-Null
@@ -80,13 +80,13 @@ try {
 
     # Given an unsupported official Codex version.
     $unsupportedCommand = Join-Path $fixture "codex-unsupported.cmd"
-    Set-Content -LiteralPath $unsupportedCommand -Value "@echo off`r`necho codex-cli 0.153.0`r`n" -NoNewline
+    Set-Content -LiteralPath $unsupportedCommand -Value "@echo off`r`necho codex-cli 0.154.1`r`n" -NoNewline
     $env:CODEX_TIPS_CODEX = $unsupportedCommand
 
     # When installation is attempted, then it fails before source checkout or build.
     $unsupportedOutput = & pwsh -NoProfile -File $installer 2>&1
     if ($LASTEXITCODE -eq 0) { throw "unsupported Codex version unexpectedly succeeded" }
-    if (($unsupportedOutput | Out-String) -notmatch "unsupported Codex version 0.153.0; supported versions: 0.151.0, 0.152.0") {
+    if (($unsupportedOutput | Out-String) -notmatch "unsupported Codex version 0.154.1; supported versions: 0.151.0, 0.152.0, 0.152.1, 0.153.2, 0.153.4, 0.154.0") {
         throw "unsupported version failure did not explain the compatibility boundary"
     }
     $global:LASTEXITCODE = 0

@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-11
+
+### Added
+
+- Port the next-prompt patch to Codex CLI 0.154.0, pinned to upstream commit
+  `6b9826e3aa83b1a5947db50f4332cb9c65f1b340`.
+- Include exact patches for Codex 0.152.1, 0.153.2, and 0.153.4.
+- Include the optional manual `$tip` skill.
+
+### Changed
+
+- Cover all six saved versions in both installers, regression tests, and CI.
+- Allow selecting a single Codex version for the full-platform build workflow.
+- Preserve upstream worktree, read-only session, and model picker behavior while
+  retaining suggestion acceptance, cancellation, and stale-result protection.
+
 ## [0.2.0] - 2026-09-01
 
 ### Added

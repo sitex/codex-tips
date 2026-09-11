@@ -149,6 +149,10 @@ if (-not (Test-Path -LiteralPath $patchFile -PathType Leaf)) {
 $expectedCommit = switch ($codexTag) {
     "rust-v0.151.0" { "78c290807ce710180111df227df3b7a4fe845452" }
     "rust-v0.152.0" { "316795b3cf2a45e90d121d9f46499d4658b2645c" }
+    "rust-v0.152.1" { "5adb68a49933ae446bf11935662c83dba55a0804" }
+    "rust-v0.153.2" { "657a993cbee87acf52d14b758ce49dbd46d1b8eb" }
+    "rust-v0.153.4" { "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a" }
+    "rust-v0.154.0" { "6b9826e3aa83b1a5947db50f4332cb9c65f1b340" }
     default { Fail "missing trusted upstream commit for $codexTag" }
 }
 
